@@ -1,0 +1,12 @@
+{{ object.name }}
+{{ object.keywords }}
+{{ object.expertUuid.name }}
+{% for sname in object.courseSectionUuid.all %}
+    {{ sname.sectionUuid.name }}
+{% endfor %}
+{% for tag in object.tags.all %}
+    {{ tag.name }}
+    {% if tag.parentUuid %}
+        {{ tag.parentUuid.name }}
+    {% endif %}
+{% endfor %}
