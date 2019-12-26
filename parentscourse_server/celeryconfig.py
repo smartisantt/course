@@ -13,8 +13,8 @@ if version == "debug":
     app.conf.broker_url = 'redis://127.0.0.1:6379/2'
     app.conf.result_backend = 'redis://127.0.0.1:6379/3'
 elif version == "test":
-    app.conf.broker_url = 'redis://172.17.0.15:6379/2'
-    app.conf.result_backend = 'redis://172.17.0.15:6379/3'
+    app.conf.broker_url = 'redis://172.17.0.20:6379/2'
+    app.conf.result_backend = 'redis://172.17.0.20:6379/3'
 elif version == "ali_test":
     app.conf.broker_url = 'redis://:hbb123@39.97.229.202:6379/4'
     app.conf.result_backend = 'redis://:hbb123@39.97.229.202:6379/5'
@@ -32,4 +32,5 @@ app.autodiscover_tasks()
 @app.task(bind=True)
 def debug_task(self):
     pass
+    # 调试
     # print('Request: {0!r}'.format(self.request))

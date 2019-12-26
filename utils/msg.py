@@ -159,3 +159,14 @@ LIVE_COURSE_MSG_NOT_EXISTS = {"code": 400, "msg": "直播消息不存在"}
 
 # 提现
 WITHDRAWAL_NOT_EXISTS = {"code": 400, "msg": "提现不存在"}
+
+# 直播课
+LIVE_COURSE_START_SUCCESS = {"code": 200, "msg": "开始直播课成功"}
+LIVE_COURSE_END_SUCCESS = {"code": 200, "msg": "结束直播课成功"}
+
+# 对接我们封装的环信接口
+IM_ERROR = {"code": 400, "msg": "IM通讯出错"}
+IM_NOT_FOUND_ERROR = {"code": 400, "msg": "IM通讯群或者指定的用户不存在"}
+
+MSG_NOT_EXISTS = {"code": 400, "msg": "该消息不存在"}
+

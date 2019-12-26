@@ -1,3 +1,4 @@
+log/*
 common/access.log*
 config.py
 migrations/

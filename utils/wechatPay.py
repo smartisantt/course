@@ -5,15 +5,17 @@ time:2019-10-25
 """
 
 import hashlib
+import logging
 import time
 import requests
 from bs4 import BeautifulSoup
 from random import Random
 
 # 微信公众号、商户平台基础配置
-from parentscourse_server.config import HOST_URL
+from common.models import PayLog
+from parentscourse_server.config import HOST_URL, WEBAPPID
 
-APPID = "wx233ca74b3d313293"
+APPID = WEBAPPID
 APIKEY = '1e5ddecea41cf3c8d86e609c1299dd81'
 create_ip = '192.168.100.235'
 MCHID = '1547729361'
@@ -74,20 +76,26 @@ def trans_xml_to_dict(data_xml):
     return data_dict
 
 
-def wx_pay_unifiedorde(detail):
+def wx_pay_unifiedorde(detail,request):
     """
     访问微信支付统一下单接口
     :param detail:
     :return:
     """
     detail['sign'] = get_sign(detail, APIKEY)
+    detail['userUuid'] = request.user.get("userObj")
+    try:
+        PayLog.objects.create(**detail)
+        detail.pop("userUuid")
+    except Exception as e:
+        logging.error(str(e))
     xml = trans_dict_to_xml(detail)
     response = requests.request('post', 'https://api.mch.weixin.qq.com/pay/unifiedorder',
                                 data=xml)
     return response.content
 
 
-def hbb_wx_pay_params(data_dict):
+def hbb_wx_pay_params(data_dict, request):
     """
     从公众号端获取微信的Jsapi支付需要的参数
     :param openid:微信公众号用户的openid
@@ -99,7 +107,6 @@ def hbb_wx_pay_params(data_dict):
     params = {
         "appid": APPID,
         "mch_id": MCHID,
-        "device_info": "WEB",
         "nonce_str": random_str(),
         "sign_type": "MD5",
         "body": '商品描述：{0}'.format(data_dict.get("body")),
@@ -111,13 +118,12 @@ def hbb_wx_pay_params(data_dict):
         "notify_url": '{0}/api/common/wxpayresult/'.format(HOST_URL),  # 回调地址
         "trade_type": "JSAPI",
         "product_id": data_dict.get("goodsID"),
-        # "limit_pay": "no_credit",
         "openid": data_dict.get("openid"),
         "device_info": data_dict.get("device_info")
     }
 
     # 调用微信统一下单支付接口url
-    notify_result = wx_pay_unifiedorde(params)
+    notify_result = wx_pay_unifiedorde(params, request)
     notify_result = trans_xml_to_dict(notify_result)
     # print('向微信请求', notify_result)
     if 'return_code' in notify_result and notify_result['return_code'] == 'FAIL':
@@ -172,23 +178,12 @@ def hbb_wx_pay_query(orderNO):
         "nonce_str": random_str(),
         "sign_type": "MD5",
     }
-    print(params)
     notify_result = wx_pay_orderquery(params)
     notify_result = trans_xml_to_dict(notify_result)
-    print("notify_result")
     if 'return_code' not in notify_result and notify_result['return_code'] != 'SUCCESS':
         return False
     if "trade_state" in notify_result:
-        res_params = {
-            "appid": notify_result.get("appid"),
-            "mch_id": notify_result.get("mch_id"),
-            "out_trade_no": notify_result.get("out_trade_no"),
-            "nonce_str": notify_result.get("nonce_str"),
-            "sign_type": "MD5",
-            "sign": notify_result.get("sign")
-        }
-        print("res_params")
-        return res_params
+        return notify_result
     return False
 
 

@@ -1,12 +1,17 @@
+import json
+import logging
 import threading
 
+from django_redis import get_redis_connection
 from rest_framework import serializers
 import time
-from client.models import Chats
+from client.models import Chats, Banner, MayLike
 from common.models import *
 from common.rePattern import TEL_PATTERN, CheckPhone
 from manager.serializers import LiveCourseBannerPostSerializer, LiveCourseBannerSerializer
+from parentscourse_server.config import *
 from utils.errors import ParamError
+from utils.tencentIM2 import ServerAPI
 from utils.msg import *
 from utils.ppt2png import get_sts_token, change, get_res
 from utils.timeTools import timeChange
@@ -18,18 +23,16 @@ class ExpertNameSerializer(serializers.ModelSerializer):
     class Meta:
         model = Experts
         fields = (
-            "uuid", "avatar", "name")
+            "uuid", "avatar", "name", "department", "jobTitle", "hospital")
 
 
 class CourseSourceUrlSerializer(serializers.ModelSerializer):
-
     class Meta:
         model = CourseSource
         fields = ("uuid", "name", "sourceUrl")
 
 
 class LiveCourseSerializer(serializers.ModelSerializer):
-
     class Meta:
         model = LiveCourse
         fields = ("uuid", "name")
@@ -42,13 +45,49 @@ class CourseSelectSerializer(serializers.ModelSerializer):
     startTime = serializers.SerializerMethodField()
     duration = serializers.SerializerMethodField()
     realPrice = serializers.SerializerMethodField()
-    preChapter = serializers.SerializerMethodField()
     courseSource = serializers.SerializerMethodField()
+    # editable = serializers.SerializerMethodField()
+    updateStatus = serializers.SerializerMethodField()
+    liveRoomId = serializers.SerializerMethodField()
 
+    @staticmethod
+    def get_liveRoomId(obj):
+        chapter = Chapters.objects.filter(courseUuid=obj).first()
+        if not chapter:
+            return
+        if chapter.chapterStyle == 1:
+            if IM_PLATFORM == "TM":
+                return chapter.roomUuid.tmId
+            else:
+                return chapter.roomUuid.huanxingId
+
+    @staticmethod
+    def get_updateStatus(obj):
+        chapter = Chapters.objects.filter(courseUuid=obj).first()
+        if not chapter:
+            return obj.updateStatus
+        if chapter.chapterStyle == 1:
+            try:
+                if chapter.roomUuid.liveStatus == 1 and (chapter.startTime - time.time() * 1000) < 0:
+                    return 5  # 直播中
+            except Exception:
+                return 4  # 直播结束
+            return chapter.updateStatus
+        else:
+            return chapter.updateStatus
+
+    # @staticmethod
+    # def get_editable(obj):
+    #     if not obj.startTime:
+    #         return True
+    #     if obj.startTime < int(round(time.time() * 1000)) + 10 * 60 * 1000:
+    #         return False
+    #     return True
 
     @staticmethod
     def get_chapters(obj):
-        queryset = Chapters.objects.filter(courseUuid=obj.uuid).all().count()
+        # 统计的章节数量
+        queryset = Chapters.objects.filter(courseUuid=obj.uuid).exclude(status=4).count()
         return queryset
 
     @staticmethod
@@ -86,21 +125,12 @@ class CourseSelectSerializer(serializers.ModelSerializer):
         return None
 
     @staticmethod
-    def get_preChapter(obj):
-        queryset = Chapters.objects.filter(courseUuid=obj).count()
-        if queryset:
-            return queryset
-        return None
-
-
-    @staticmethod
     def get_courseSource(obj):
         queryset = Chapters.objects.filter(courseUuid=obj).first()
         if queryset:
             courseSource = queryset.courseSourceUuid
             return CourseSourceUrlSerializer(courseSource).data
         return None
-
 
     @staticmethod
     def get_liveCourseUuid(obj):
@@ -109,14 +139,13 @@ class CourseSelectSerializer(serializers.ModelSerializer):
             return None
         return None
 
-
     class Meta:
         model = Courses
         fields = (
             "uuid", "courseType", "createTime", "updateTime", "courseBanner", "name", "coursePermission",
             "updateStatus", "preChapter",
             "experts",
-            "realPrice", "status", "startTime", "chapters", "chapterStyle", "duration","courseSource")
+            "realPrice", "status", "startTime", "chapters", "chapterStyle", "duration", "courseSource", "liveRoomId")
 
 
 class courseSectionSerializer(serializers.ModelSerializer):
@@ -128,7 +157,7 @@ class courseSectionSerializer(serializers.ModelSerializer):
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ("uuid", "nickName")
+        fields = ("uuid", "nickName", "avatar")
 
 
 class TagsSerializer(serializers.ModelSerializer):
@@ -146,7 +175,7 @@ class CourseBasicSerializer(serializers.ModelSerializer):
 class CourseSourceSerializer(serializers.ModelSerializer):
     class Meta:
         model = CourseSource
-        fields = ("uuid", "name")
+        fields = ("uuid", "name", "sourceUrl")
 
 
 class SectionBasicSerializer(serializers.ModelSerializer):
@@ -175,6 +204,44 @@ class CourseInfoSerializer(serializers.ModelSerializer):
     courseSection = serializers.SerializerMethodField()
     liveCourseUuid = serializers.SerializerMethodField()
     liveCourseBanner = serializers.SerializerMethodField()
+    editable = serializers.SerializerMethodField()
+    liveRoomId = serializers.SerializerMethodField()
+    updateStatus = serializers.SerializerMethodField()
+
+    @staticmethod
+    def get_updateStatus(obj):
+        if obj.courseType == 1:
+            chapter = obj.chapterCourseUuid.first()
+            if chapter.chapterStyle == 1:
+                try:
+                    if chapter.roomUuid.liveStatus == 1 and (chapter.startTime - time.time() * 1000) < 0:
+                        return 5  # 直播中
+                except Exception:
+                    return 4  # 直播结束
+                return chapter.updateStatus
+            else:
+                return chapter.updateStatus
+
+    @staticmethod
+    def get_liveRoomId(obj):
+        if obj.courseType == 1:
+            chapter = obj.chapterCourseUuid.first()
+            if not chapter:
+                return
+            if chapter.chapterStyle == 1:
+                if IM_PLATFORM == "TM":
+                    return chapter.roomUuid.tmId
+                else:
+                    return chapter.roomUuid.huanxingId
+
+    @staticmethod
+    def get_editable(obj):
+        if not obj.startTime:
+            return True
+        # 直播前10分钟 或者 直播中直播已结束则不能编辑
+        if obj.startTime < int(round(time.time() * 1000)) + 10 * 60 * 1000 or obj.updateStatus in [4, 5]:
+            return False
+        return True
 
     @staticmethod
     def get_mc(obj):
@@ -308,7 +375,7 @@ class CourseInfoSerializer(serializers.ModelSerializer):
             "preChapter", "inviter", "courseSourceUuid", "courseBanner", "courseThumbnail", "shareImg", "infoType",
             "info", "tags", "coursePermission", "originalPrice", "realPrice", "rewardStatus", "rewardPercent", "gifts",
             "keywords", "vPopularity", "courseSection", "relatedCourse", "mustRead", "isCoupon",
-            "tryInfoUuid", "liveCourseUuid", "liveCourseBanner")
+            "tryInfoUuid", "liveCourseUuid", "liveCourseBanner", "editable", "liveRoomId", "updateStatus")
 
 
 class CourseSaveSerializer(serializers.ModelSerializer):
@@ -323,6 +390,7 @@ class CourseSaveSerializer(serializers.ModelSerializer):
     subhead = serializers.CharField(max_length=30,
                                     required=False,
                                     allow_null=True,
+                                    allow_blank=True,
                                     error_messages={
                                         'max_length': "副标题最多30个字符"
                                     })
@@ -332,6 +400,7 @@ class CourseSaveSerializer(serializers.ModelSerializer):
     briefIntro = serializers.CharField(max_length=200,
                                        required=False,
                                        allow_null=True,
+                                       allow_blank=True,
                                        error_messages={
                                            "max_length": "简介最多200个字"
                                        })
@@ -341,7 +410,8 @@ class CourseSaveSerializer(serializers.ModelSerializer):
                                           error_messages={'required': "预计章节数量必填",
                                                           "min_value": "最小章节数0"
                                                           })
-    chapterStyle = serializers.ChoiceField(choices=COURSE_STYLE_CHOICES, required=False,allow_null=True,)  # 上课形式，1直播，2音频，3视频
+    chapterStyle = serializers.ChoiceField(choices=COURSE_STYLE_CHOICES, required=False,
+                                           allow_null=True, )  # 上课形式，1直播，2音频，3视频
     startTime = serializers.DateTimeField(required=False, allow_null=True)
     mc = serializers.SlugRelatedField(required=False, slug_field="uuid", queryset=User.objects.filter(status=1),
                                       allow_null=True, error_messages={"does_not_exist": "对象不可选或不存在"})
@@ -372,7 +442,7 @@ class CourseSaveSerializer(serializers.ModelSerializer):
                                                             "min_length": "缩略图信息有误"})
     shareImg = serializers.CharField(required=False, max_length=1024, min_length=16,
                                      error_messages={"max_length": "分享图信息有误",
-                                                     "min_length": "分享图信息有误"},allow_null=True)
+                                                     "min_length": "分享图信息有误"}, allow_null=True)
     infoType = serializers.ChoiceField(choices=INFO_TYPE_CHOICES, required=True)
     info = serializers.CharField(required=True, error_messages={"required": "课程介绍必填"})
     tags = serializers.SlugRelatedField(many=True, allow_null=False, required=True, slug_field="uuid",
@@ -381,9 +451,10 @@ class CourseSaveSerializer(serializers.ModelSerializer):
     coursePermission = serializers.ChoiceField(choices=COURSES_PERMISSION_CHOICES, required=True,
 
                                                error_messages={"required": "上课权限必填", "choices": "权限类型有误"})
-    originalPrice = serializers.IntegerField(min_value=0, required=True,
+    originalPrice = serializers.DecimalField(min_value=0, required=True, max_digits=12, decimal_places=2,
+                                             allow_null=True,
                                              error_messages={"min_value": "价格设置有误", "required": "划线价必填"})
-    realPrice = serializers.IntegerField(min_value=0, required=True,
+    realPrice = serializers.DecimalField(min_value=0, required=True, max_digits=12, decimal_places=2, allow_null=True,
                                          error_messages={"min_value": "价格设置有误", "required": "真实价格必填"})
     rewardStatus = serializers.NullBooleanField(required=True, error_messages={"required": "是否分销必填"})
     rewardPercent = serializers.IntegerField(max_value=100, min_value=0,
@@ -394,7 +465,7 @@ class CourseSaveSerializer(serializers.ModelSerializer):
                                          error_messages={"does_not_exist": "对象不可选或不存在"})
     keywords = serializers.ListField(child=serializers.CharField(), max_length=10)
     vPopularity = serializers.IntegerField(default=0, required=False, min_value=0,
-                                           error_messages={"min_value": "虚拟人气值有误"},allow_null=True)
+                                           error_messages={"min_value": "虚拟人气值有误"}, allow_null=True)
     relatedCourse = serializers.SlugRelatedField(many=True, slug_field="uuid", allow_null=True, required=False,  # 关联课程
                                                  queryset=Courses.objects.exclude(status=4),
                                                  error_messages={"does_not_exist": "对象不可选或不存在"})
@@ -420,6 +491,9 @@ class CourseSaveSerializer(serializers.ModelSerializer):
         if coursePermission == 1:
             # 校验课程价格
             if originalPrice != 0 or realPrice != 0:
+                raise ParamError(COURSE_PRICE_ERROR)
+        else:
+            if realPrice == 0:
                 raise ParamError(COURSE_PRICE_ERROR)
         if originalPrice < realPrice:
             raise ParamError(COURSE_PRICE_ERROR)
@@ -462,7 +536,7 @@ class CourseSaveSerializer(serializers.ModelSerializer):
                     raise ParamError(COURSE_SOURCE_TYPE_ERROR)
         return data
 
-    def create_chat_room(self, validated_data):
+    def create_chat_room(self, validated_data, request):
         """
         创建聊天室
         """
@@ -477,10 +551,67 @@ class CourseSaveSerializer(serializers.ModelSerializer):
         chatRoom_dict["mcUuid"] = validated_data.get("mc", None)
         chatRoom_dict["studyNum"] = validated_data.get("vPopularity", 0)
         chatRoom_dict["expertUuid"] = validated_data.get("expertUuid", None)
+        chatRoom_dict["ownerUuid"] = request.user  # 建群人，
         chat_room = ChatsRoom.objects.create(**chatRoom_dict)
         inviter = validated_data.get("inviter", None)
         if inviter:
             chat_room.inviterUuid.set(inviter)
+
+        # 创建环信聊天室, 添加相关人员到聊天室
+        api = ServerAPI()
+        addMembers = {}
+        members = []
+
+        if inviter:
+            for user in inviter:
+                members.append({
+                    "username": user.uuid,
+                    "nickname": user.nickName,
+                    "faceUrl": user.avatar or DEFAULT_AVATAR,
+                    "role": "ASSISTANTS"
+                })
+
+            addMembers["ASSISTANTS"] = ",".join([item["username"] for item in members])
+
+        expert = validated_data.get("expertUuid", None)
+        if expert:
+            members.append({
+                "username": expert.userUuid.uuid,
+                "nickname": expert.name,
+                "faceUrl": expert.avatar or DEFAULT_AVATAR,
+                "role": "DOCTOR"
+            })
+            addMembers["DOCTOR"] = expert.userUuid.uuid
+
+        mc = validated_data.get("mc", None)
+        if mc:
+            members.append({
+                "username": mc.uuid,
+                "nickname": mc.nickName,
+                "faceUrl": mc.avatar or DEFAULT_AVATAR,
+                "role": "DZ"
+            })
+            addMembers["DZ"] = mc.uuid
+
+        # members.append({
+        #     "username": request.user.uuid,
+        #     "nickname": request.user.nickName,
+        #     "role": "OWNER"
+        # })
+
+        room_id = api.createChatroom(chatRoom_dict["name"], validated_data.get("briefIntro", ""), members)
+        # Conn = get_redis_connection("default")
+        # try:
+        #     res = Conn.hmset(IM_PREFIX + room_id, addMembers)
+        # except Exception as e:
+        #     raise ParamError("连接Redis失败!!")
+
+        if IM_PLATFORM == "TM":
+            chat_room.tmId = room_id
+        else:
+            chat_room.huanxingId = room_id
+        chat_room.save()
+
         return chat_room
 
     #########################################################
@@ -509,6 +640,7 @@ class CourseSaveSerializer(serializers.ModelSerializer):
             liveCourse.liveCourseBannerUuid = liveCourseBanner
             liveCourse.save()
             return liveCourse
+
     #########################################################
 
     def create_chapter(self, validated_data, instance, chat_room):
@@ -531,6 +663,8 @@ class CourseSaveSerializer(serializers.ModelSerializer):
         coursePermission = instance.coursePermission
         if chapter_dict["chapterStyle"] in [2, 3]:
             chapter_dict["updateStatus"] = 1
+        else:
+            chapter_dict["updateStatus"] = 6  # 如果是直播课则是未开始的状态
         chapter_dict["isTry"] = 1
         if coursePermission == 1:
             chapter_dict["isTry"] = 2
@@ -542,8 +676,8 @@ class CourseSaveSerializer(serializers.ModelSerializer):
         goods_dict["name"] = instance.name
         goods_dict["content"] = instance.uuid
         goods_dict["icon"] = instance.courseBanner
-        goods_dict["originalPrice"] = int(validated_data["originalPrice"]) * 100
-        goods_dict["realPrice"] = int(validated_data["realPrice"]) * 100
+        goods_dict["originalPrice"] = int(float(validated_data["originalPrice"]) * 100 + 0.5)
+        goods_dict["realPrice"] = int(float(validated_data["realPrice"]) * 100 + 0.5)
         goods_dict["goodsType"] = instance.courseType
         goods_dict["inventory"] = 1000000
         goods_dict["rewardStatus"] = validated_data["rewardStatus"]
@@ -574,6 +708,8 @@ class CourseSaveSerializer(serializers.ModelSerializer):
         if course_dict["courseType"] == 1:
             if chapterStyle in [2, 3]:
                 course_dict["updateStatus"] = 1
+            else:
+                course_dict["updateStatus"] = 6  # 直播未开始
         elif course_dict["courseType"] == 2:
             course_dict["updateStatus"] = 2
         keywords = validated_data.get("keywords", None)
@@ -585,7 +721,7 @@ class CourseSaveSerializer(serializers.ModelSerializer):
             course_dict["startTime"] = startTime
         course_dict["vPopularity"] = validated_data.get("vPopularity", None)
         course_dict["mustRead"] = validated_data["mustRead"]
-        max_weight = Courses.objects.exclude(status=4).all().aggregate(Max('weight'))["weight__max"]
+        max_weight = Courses.objects.exclude(status=4).all().aggregate(Max('weight'))["weight__max"] or 0
         course_dict["weight"] = max_weight + 1
         # 创建课程
         course = Courses.objects.create(**course_dict)
@@ -626,6 +762,7 @@ class CourseUpdateSerializer(serializers.Serializer):
     subhead = serializers.CharField(max_length=30,
                                     required=False,
                                     allow_null=True,
+                                    allow_blank=True,
                                     error_messages={
                                         'max_length': "副标题最多30个字符"
                                     })
@@ -635,6 +772,7 @@ class CourseUpdateSerializer(serializers.Serializer):
     briefIntro = serializers.CharField(max_length=200,
                                        required=False,
                                        allow_null=True,
+                                       allow_blank=True,
                                        error_messages={
                                            "max_length": "简介最多200个字"
                                        })
@@ -644,7 +782,7 @@ class CourseUpdateSerializer(serializers.Serializer):
                                           error_messages={'required': "预计章节数量必填",
                                                           "min_value": "最小章节数0"
                                                           })
-    startTime = serializers.DateTimeField(required=False,allow_null=True)
+    startTime = serializers.DateTimeField(required=False, allow_null=True)
     mc = serializers.SlugRelatedField(required=False, slug_field="uuid", queryset=User.objects.filter(status=1),
                                       allow_null=True, error_messages={"does_not_exist": "对象不可选或不存在"})
     inviter = serializers.SlugRelatedField(required=False, many=True, slug_field="uuid",
@@ -665,7 +803,7 @@ class CourseUpdateSerializer(serializers.Serializer):
                                             error_messages={"required": "缩略图必填",
                                                             "max_length": "缩略图信息有误",
                                                             "min_length": "缩略图信息有误"})
-    shareImg = serializers.CharField(required=False, max_length=1024, min_length=16,allow_null=True,
+    shareImg = serializers.CharField(required=False, max_length=1024, min_length=16, allow_null=True,
                                      error_messages={"max_length": "分享图信息有误",
                                                      "min_length": "分享图信息有误"})
     infoType = serializers.ChoiceField(choices=INFO_TYPE_CHOICES, required=True)
@@ -675,9 +813,14 @@ class CourseUpdateSerializer(serializers.Serializer):
                                         error_messages={"does_not_exist": "对象不可选或不存在"})
     coursePermission = serializers.ChoiceField(choices=COURSES_PERMISSION_CHOICES, required=True,
                                                error_messages={"required": "上课权限必填", "choices": "权限类型有误"})
-    originalPrice = serializers.IntegerField(min_value=0, required=True,
+    # originalPrice = serializers.IntegerField(min_value=0, required=True,
+    #                                          error_messages={"min_value": "价格设置有误", "required": "划线价必填"})
+    # realPrice = serializers.IntegerField(min_value=0, required=True,
+    #                                      error_messages={"min_value": "价格设置有误", "required": "真实价格必填"})
+    originalPrice = serializers.DecimalField(min_value=0, required=True, max_digits=12, decimal_places=2,
+                                             allow_null=True,
                                              error_messages={"min_value": "价格设置有误", "required": "划线价必填"})
-    realPrice = serializers.IntegerField(min_value=0, required=True,
+    realPrice = serializers.DecimalField(min_value=0, required=True, max_digits=12, decimal_places=2, allow_null=True,
                                          error_messages={"min_value": "价格设置有误", "required": "真实价格必填"})
     rewardStatus = serializers.NullBooleanField(required=True, error_messages={"required": "是否分销必填"})
     rewardPercent = serializers.IntegerField(max_value=100, min_value=0,
@@ -688,7 +831,7 @@ class CourseUpdateSerializer(serializers.Serializer):
                                          error_messages={"does_not_exist": "对象不可选或不存在"})
     # keywords = serializers.CharField(max_length=512, required=False, error_messages={"max_length": "关键词长度有误"})
     keywords = serializers.ListField(child=serializers.CharField(), max_length=10)
-    vPopularity = serializers.IntegerField(default=0, required=False,allow_null=True, min_value=0,
+    vPopularity = serializers.IntegerField(default=0, required=False, allow_null=True, min_value=0,
                                            error_messages={"min_value": "虚拟人气值有误"})
     relatedCourse = serializers.SlugRelatedField(many=True, slug_field="uuid", allow_null=True,  # 关联课程
                                                  queryset=Courses.objects.exclude(status=4),
@@ -705,6 +848,7 @@ class CourseUpdateSerializer(serializers.Serializer):
                                                   error_messages={"does_not_exist": "对象不可选或不存在"})
 
     liveCourseBanner = serializers.DictField(required=False, allow_null=True)
+
     ######################################################
 
     def check_params(self, instance, data):
@@ -722,6 +866,9 @@ class CourseUpdateSerializer(serializers.Serializer):
             # 校验课程价格
             if originalPrice != 0 or realPrice != 0:
                 raise ParamError(COURSE_PRICE_ERROR)
+        else:
+            if realPrice == 0:
+                raise ParamError(COURSE_PRICE_ERROR)
         if originalPrice < realPrice:
             raise ParamError(COURSE_PRICE_ERROR)
         if not rewardStatus:
@@ -738,6 +885,8 @@ class CourseUpdateSerializer(serializers.Serializer):
             # 校验单次课相关
             if chapter.chapterStyle == 1:
                 # 校验章节类型
+                if chapter.updateStatus != 6:
+                    raise ParamError(START_TIME_FORBIDDEN)
                 if not startTime or not mc:
                     raise ParamError(START_MC_ERROR)
                 nowTime = time.time() * 1000
@@ -751,6 +900,7 @@ class CourseUpdateSerializer(serializers.Serializer):
                     a.is_valid(raise_exception=True)
                 if not data.get("liveCourseUuid"):
                     raise ParamError(LIVE_COURSE_NOT_EXISTS)
+
                 #####################################################
             if chapter.chapterStyle == 2:
                 # 校验课件类型
@@ -793,13 +943,79 @@ class CourseUpdateSerializer(serializers.Serializer):
             liveCourse.liveCourseBannerUuid = liveCourseBanner
             liveCourse.save()
             return liveCourse
+
     ############################################################
 
-    def updateCourse(self, instance, validated_data):
+    def updateCourse(self, instance, validated_data, request):
         shareImg = instance.shareImg
         courseSource = validated_data.get("courseSourceUuid", None)
         if courseSource:
             instance.duration = courseSource.duration
+        ########################################################################
+        # 如果是单次课而且是直播课  获取原来待删除聊天室的用户   注册新用户 添加新用户到聊天室    修改聊天室信息
+        chapter = Chapters.objects.filter(courseUuid=instance).first()
+        if instance.courseType == 1 and chapter.chapterStyle == 1:
+            chatRoom = ChatsRoom.objects.filter(roomChapterUuid__courseUuid=instance).first()
+
+            room_id = None
+            try:
+                if IM_PLATFORM == "TM":
+                    room_id = chatRoom.tmId
+                else:
+                    room_id = chatRoom.huanxingId
+
+            except Exception as e:
+                logging.error(str(e))
+
+            # 是否对应的有环信群
+            if room_id:
+                api = ServerAPI()
+                addMembers = {}
+                members = []
+
+                inviter = validated_data.get("inviter", None)
+                if inviter:
+                    for user in inviter:
+                        members.append({
+                            "username": user.uuid,
+                            "nickname": user.nickName,
+                            "faceUrl": user.avatar or DEFAULT_AVATAR,
+                            "role": "ASSISTANTS"
+                        })
+
+                    addMembers["ASSISTANTS"] = ",".join([item["username"] for item in members])
+
+                expert = validated_data.get("expertUuid", None)
+                if expert:
+                    members.append({
+                        "username": expert.userUuid.uuid,
+                        "nickname": expert.name,
+                        "faceUrl": expert.avatar or DEFAULT_AVATAR,
+                        "role": "DOCTOR"
+                    })
+                    addMembers["DOCTOR"] = expert.userUuid.uuid
+
+                mc = validated_data.get("mc", None)
+                if mc:
+                    members.append({
+                        "username": mc.uuid,
+                        "nickname": mc.nickName,
+                        "faceUrl": mc.avatar or DEFAULT_AVATAR,
+                        "role": "DZ"
+                    })
+                    addMembers["DZ"] = mc.uuid
+
+                api.modifyChatroom(room_id, validated_data["name"],
+                                   validated_data.get("briefIntro", instance.briefIntro))
+                api.modifyChatroomMembers(room_id, members)
+                Conn = get_redis_connection("default")
+                try:
+                    res = Conn.hmset(IM_PREFIX + room_id, addMembers)
+                except Exception as e:
+                    raise ParamError("连接Redis失败!!")
+
+        ########################################################################
+
         instance.name = validated_data["name"]
         instance.subhead = validated_data.get("subhead", instance.subhead)
         instance.expertUuid = validated_data["expertUuid"]
@@ -811,8 +1027,8 @@ class CourseUpdateSerializer(serializers.Serializer):
         instance.infoType = validated_data["infoType"]
         instance.info = validated_data["info"]
         instance.coursePermission = validated_data["coursePermission"]
-        instance.originalPrice = int(validated_data["originalPrice"]) * 100
-        instance.realPrice = int(validated_data["realPrice"]) * 100
+        instance.originalPrice = int(float(validated_data["originalPrice"]) * 100 + 0.5)
+        instance.realPrice = int(float(validated_data["realPrice"]) * 100 + 0.5)
         keywords = validated_data.get("keywords", instance.keywords)
         if keywords:
             instance.keywords = ",".join(keywords)
@@ -822,8 +1038,8 @@ class CourseUpdateSerializer(serializers.Serializer):
             instance.startTime = startTime
         instance.vPopularity = validated_data.get("vPopularity", instance.vPopularity)
         instance.mustRead = validated_data["mustRead"]
-        # 创建课程
 
+        # 创建课程
         gifts = validated_data["gifts"]
         tags = validated_data["tags"]
         # 关联礼物
@@ -883,7 +1099,7 @@ class CourseUpdateSerializer(serializers.Serializer):
         return chapter_dict
 
     def update_chat_room(self, courseInstance, validated_data):
-        chatRoom_dict = ChatsRoom.objects.filter(roomChapterUuid__courseUuid = courseInstance).first()
+        chatRoom_dict = ChatsRoom.objects.filter(roomChapterUuid__courseUuid=courseInstance).first()
         if not chatRoom_dict:
             chatRoom_dict = ChatsRoom()
         chatRoom_dict.name = courseInstance.name
@@ -917,6 +1133,19 @@ class CourseDeleteSerializer(serializers.ModelSerializer):
     def change_status(self, instance, data):
         if instance.status == data["status"]:
             raise ParamError(NOT_CHANGE_STATUS_ERROR)
+
+        ###############关联逻辑 如果改成不是正常则需要校验关联#################
+        if data["status"] != 1:
+            if Banner.objects.filter(type=1, target=instance.uuid).exists():
+                raise ParamError({'code': 400, 'msg': '该课程已关联轮播图，不能停用或下架'})
+            if CourseLive.objects.filter(status__in=[1, 2], courseUuid=instance).exists():
+                raise ParamError({'code': 400, 'msg': '该课程已关联轮大咖直播，不能停用或下架'})
+            if not instance.courseSections.filter(enable=True).all():
+                raise ParamError({'code': 400, 'msg': '该课程已关联非固定栏目，不能停用或下架'})
+            if MayLike.objects.filter(courseUuid=instance, status__in=[1, 2]).exists():
+                raise ParamError({'code': 400, 'msg': '该课程已关联猜你喜欢，不能停用或下架'})
+        ##########################################
+
         status = data["status"]
         goods = Goods.objects.filter(content=instance.uuid).all()
         chapters = Chapters.objects.filter(courseUuid=instance).all()
@@ -967,6 +1196,18 @@ class ChaptersSelectSerializer(serializers.ModelSerializer):
     expert = serializers.SerializerMethodField()
     courseSource = serializers.SerializerMethodField()
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+
+        page = 1
+        pageSize = 10
+        if self.context['request'].query_params.get('page'):
+            page = int(self.context['request'].query_params.get('page'))
+            if self.context['request'].query_params.get('pageSize'):
+                pageSize = int(self.context['request'].query_params.get('pageSize'))
+        data['serialNumber'] = list(self.instance).index(instance) + 1 + (page - 1) * pageSize
+        return data
+
     @staticmethod
     def get_expert(obj):
         queryset = Experts.objects.filter(uuid=obj.expertUuid_id).first()
@@ -981,6 +1222,7 @@ class ChaptersSelectSerializer(serializers.ModelSerializer):
         except:
             queryset = None
         return queryset
+
     @staticmethod
     def get_courseSource(obj):
         queryset = obj.courseSourceUuid
@@ -992,19 +1234,20 @@ class ChaptersSelectSerializer(serializers.ModelSerializer):
         model = Chapters
         fields = (
             "uuid", "serialNumber", "chapterBanner", "name", "chapterStyle", "updateStatus", "expert", "createTime",
-            "startTime", "duration", "isTry", "status","courseSource")
+            "startTime", "duration", "isTry", "status", "courseSource")
 
 
 class ChaptersInfoSerializer(serializers.ModelSerializer):
     courseSourceUuid = CourseSourceSerializer()
     tryInfoUuid = CourseSourceSerializer()
-    expert = serializers.SerializerMethodField()
+    experts = serializers.SerializerMethodField()
     keywords = serializers.SerializerMethodField()
     mc = serializers.SerializerMethodField()
     inviter = serializers.SerializerMethodField()
     startTime = serializers.SerializerMethodField()
     liveCourseUuid = serializers.SerializerMethodField()
     liveCourseBanner = serializers.SerializerMethodField()
+    liveRoomId = serializers.SerializerMethodField()
 
     @staticmethod
     def get_liveCourseUuid(obj):
@@ -1035,7 +1278,7 @@ class ChaptersInfoSerializer(serializers.ModelSerializer):
         return queryset
 
     @staticmethod
-    def get_expert(obj):
+    def get_experts(obj):
         queryset = Experts.objects.filter(uuid=obj.expertUuid_id).first()
         if queryset:
             return ExpertNameSerializer(queryset).data
@@ -1060,14 +1303,22 @@ class ChaptersInfoSerializer(serializers.ModelSerializer):
         queryset = ChatsRoom.objects.filter(roomChapterUuid=obj).first()
         if queryset:
             return UserSerializer(queryset.mcUuid).data
-        return {}
+        return None
+
+    @staticmethod
+    def get_liveRoomId(obj):
+        if obj.chapterStyle == 1:
+            if IM_PLATFORM == "TM":
+                return obj.roomUuid.tmId
+            else:
+                return obj.roomUuid.huanxingId
 
     class Meta:
         model = Chapters
         fields = (
             "uuid", "serialNumber", "chapterBanner", "name", "chapterStyle", "updateStatus", "createTime", "startTime",
-            "duration", "courseSourceUuid", "tryInfoUuid", "expert", "keywords",
-            "status", "inviter", "mc", "liveCourseUuid", "liveCourseBanner")
+            "duration", "courseSourceUuid", "tryInfoUuid", "experts", "keywords",
+            "status", "inviter", "mc", "liveRoomId", "liveCourseUuid", "liveCourseBanner")
 
 
 class ChapterSaveSerializer(serializers.Serializer):
@@ -1091,15 +1342,16 @@ class ChapterSaveSerializer(serializers.Serializer):
                                           error_messages={"required": "封面信息必填",
                                                           "max_length": "封面信息有误",
                                                           "min_length": "封面信息有误"})
-    keywords = serializers.ListField(child=serializers.CharField(), max_length=10,required=False,allow_null=True)
-    startTime = serializers.DateTimeField(required=False, error_messages={'required': "开始时间必填"},allow_null=True)
+    keywords = serializers.ListField(child=serializers.CharField(), max_length=10, required=False, allow_null=True)
+    startTime = serializers.DateTimeField(required=False, error_messages={'required': "开始时间必填"}, allow_null=True)
     expertUuid = serializers.SlugRelatedField(allow_null=False, slug_field="uuid", required=True,
                                               queryset=Experts.objects.filter(enable=1),
                                               error_messages={"required": "主讲专家有误", "does_not_exist": "对象已禁用或不存在"})
     mc = serializers.SlugRelatedField(required=False, slug_field="uuid", queryset=User.objects.filter(status=1),
                                       allow_null=True, error_messages={"does_not_exist": "对象已禁用或不存在"})
     inviter = serializers.SlugRelatedField(required=False, many=True, slug_field="uuid",
-                                           queryset=User.objects.filter(status=1).all(),allow_null=True, error_messages={"does_not_exist": "对象已禁用或不存在"})
+                                           queryset=User.objects.filter(status=1).all(), allow_null=True,
+                                           error_messages={"does_not_exist": "对象已禁用或不存在"})
     status = serializers.ChoiceField(choices=COURSES_FORBIDDEN_CHOICES)
     # 章节管理 创建新的章节 直播课课件 和 直播课banner #########################################
     liveCourseUuid = serializers.SlugRelatedField(required=False, slug_field="uuid", allow_null=True,
@@ -1107,6 +1359,7 @@ class ChapterSaveSerializer(serializers.Serializer):
                                                   error_messages={"does_not_exist": "对象不可选或不存在"})
 
     liveCourseBanner = serializers.DictField(required=False, allow_null=True)
+
     ######################################################
 
     def validate(self, data):
@@ -1167,6 +1420,7 @@ class ChapterSaveSerializer(serializers.Serializer):
             liveCourse.liveCourseBannerUuid = liveCourseBanner
             liveCourse.save()
             return liveCourse
+
     #########################################################
 
     def create_chatRoom(self, validated_data):
@@ -1188,10 +1442,65 @@ class ChapterSaveSerializer(serializers.Serializer):
         inviter = validated_data.get("inviter", None)
         if inviter:
             chat_room.inviterUuid.set(inviter)
+            # 创建环信聊天室, 添加相关人员到聊天室
+            api = ServerAPI()
+            addMembers = {}
+            members = []
+
+            if inviter:
+                for user in inviter:
+                    members.append({
+                        "username": user.uuid,
+                        "nickname": user.nickName,
+                        "faceUrl": user.avatar or DEFAULT_AVATAR,
+                        "role": "ASSISTANTS"
+                    })
+
+                addMembers["ASSISTANTS"] = ",".join([item["username"] for item in members])
+
+            expert = validated_data.get("expertUuid", None)
+            if expert:
+                members.append({
+                    "username": expert.userUuid.uuid,
+                    "nickname": expert.name,
+                    "faceUrl": expert.avatar or DEFAULT_AVATAR,
+                    "role": "DOCTOR"
+                })
+                addMembers["DOCTOR"] = expert.userUuid.uuid
+
+            mc = validated_data.get("mc", None)
+            if mc:
+                members.append({
+                    "username": mc.uuid,
+                    "nickname": mc.nickName,
+                    "faceUrl": mc.avatar or DEFAULT_AVATAR,
+                    "role": "DZ"
+                })
+                addMembers["DZ"] = mc.uuid
+
+            # members.append({
+            #     "username": request.user.uuid,
+            #     "nickname": request.user.nickName,
+            #     "role": "OWNER"
+            # })
+
+            room_id = api.createChatroom(chatRoom_dict["name"], validated_data.get("briefIntro", ""), members)
+            # Conn = get_redis_connection("default")
+            # try:
+            #     res = Conn.hmset(IM_PREFIX + room_id, addMembers)
+            # except Exception as e:
+            #     raise ParamError("连接Redis失败!!")
+
+            if IM_PLATFORM == "TM":
+                chat_room.tmId = room_id
+            else:
+                chat_room.huanxingId = room_id
+            chat_room.save()
+
+            return chat_room
         return chat_room
 
     def create_chapter(self, validated_data):
-        # todo； 添加章节
         chapter_dict = {}
         course = validated_data["courseUuid"]
         max_serialNumber = Chapters.objects.filter(courseUuid=course).aggregate(Max('serialNumber'))[
@@ -1210,6 +1519,8 @@ class ChapterSaveSerializer(serializers.Serializer):
         chapter_dict["tryInfoUuid"] = validated_data.get("tryInfoUuid", None)
         if validated_data["chapterStyle"] != 1:
             chapter_dict["updateStatus"] = 1
+        else:
+            chapter_dict["updateStatus"] = 6  # 如果是直播课则是未开始的状态
         courseSource = validated_data.get("courseSourceUuid", None)
         chapter_dict["courseSourceUuid"] = courseSource
         if courseSource:
@@ -1227,7 +1538,7 @@ class ChapterSaveSerializer(serializers.Serializer):
     class Meta:
         model = Chapters
         fields = ("courseUuid", "name", "chapterStyle", "courseSourceUuid", "tryInfoUuid", "chapterBanner", "keywords",
-                  "startTime", "expertUuid", "mc","inviter", "status")
+                  "startTime", "expertUuid", "mc", "inviter", "status")
 
 
 class ChapterUpdateSerializer(serializers.Serializer):
@@ -1252,11 +1563,12 @@ class ChapterUpdateSerializer(serializers.Serializer):
     expertUuid = serializers.SlugRelatedField(allow_null=False, slug_field="uuid", required=True,
                                               queryset=Experts.objects.filter(enable=1),
                                               error_messages={"required": "主讲专家有误", "does_not_exist": "对象不可选或不存在"})
-    mc = serializers.SlugRelatedField(required=False, slug_field="uuid", queryset=User.objects.filter(status=1),allow_empty=True,
+    mc = serializers.SlugRelatedField(required=False, slug_field="uuid", queryset=User.objects.filter(status=1),
+                                      allow_empty=True,
                                       allow_null=True, error_messages={"does_not_exist": "对象不可选或不存在"})
-    inviter = serializers.SlugRelatedField(required=False, many=True, slug_field="uuid",allow_null=True,
+    inviter = serializers.SlugRelatedField(required=False, many=True, slug_field="uuid", allow_null=True,
                                            queryset=User.objects.filter(status=1),
-                                            error_messages={"does_not_exist": "对象不可选或不存在"})
+                                           error_messages={"does_not_exist": "对象不可选或不存在"})
     status = serializers.ChoiceField(choices=COURSES_FORBIDDEN_CHOICES)
     # 章节管理 创建新的章节 直播课课件 和 直播课banner #########################################
     liveCourseUuid = serializers.SlugRelatedField(required=False, slug_field="uuid", allow_null=True,
@@ -1264,6 +1576,7 @@ class ChapterUpdateSerializer(serializers.Serializer):
                                                   error_messages={"does_not_exist": "对象不可选或不存在"})
 
     liveCourseBanner = serializers.DictField(required=False, allow_null=True)
+
     ######################################################
 
     ############################################################
@@ -1313,6 +1626,8 @@ class ChapterUpdateSerializer(serializers.Serializer):
         else:
             # 直播课校验
             ########################################################
+            if instance.updateStatus != 6:
+                raise ParamError(START_TIME_FORBIDDEN)
             if not data.get("liveCourseUuid"):
                 raise ParamError(LIVE_COURSE_NOT_EXISTS)
             if data.get("liveCourseBanner"):
@@ -1329,7 +1644,6 @@ class ChapterUpdateSerializer(serializers.Serializer):
         return data
 
     def updateChapter(self, instance, validated_data):
-        # todo： 修改章节
         expert = validated_data.get("expertUuid", None)
         if not expert:
             course = Courses.objects.filter(chapterCourseUuid=instance).first()
@@ -1404,3 +1718,43 @@ class ChapterExchangeSerializer(serializers.Serializer):
         objChapter.save()
         instance.save()
         return True
+
+
+class DummyUserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ("uuid", "userNum", "nickName", "avatar")
+
+
+class DummyUserPostSerializer(serializers.Serializer):
+    nickName = serializers.CharField(
+        max_length=20,
+        min_length=2,
+        required=True,
+        error_messages={'required': "马甲用户名必填",
+                        'min_length': "马甲用户名最少2个字符",
+                        'max_length': "马甲用户名最多20个字符"})
+    avatar = serializers.CharField(required=True,
+                                   error_messages={'required': "马甲用户头像必填"})
+
+    def validate(self, attrs):
+        nickName = attrs.get("nickName", None)
+        user = User.objects.filter(nickName=nickName).first()
+        if user:
+            raise ParamError("用户名已存在")
+        return attrs
+
+    def create_maUser(self, data):
+        data["isMajia"] = True
+        try:
+            maUser = User.objects.create(**data)
+        except Exception as e:
+            logging.error(str(e))
+            raise ParamError("新建失败")
+        return maUser
+
+
+class ChatsHistorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Chats
+        fields = ("content", "uuid", "msgSeq", "isWall")

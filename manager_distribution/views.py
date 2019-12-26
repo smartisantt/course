@@ -83,7 +83,7 @@ class CourseRepresWithdrawView(viewsets.GenericViewSet,
             instance = self.get_object()
         except Exception as e:
             raise ParamError(WITHDRAWAL_NOT_EXISTS)
-        if not instance.withdrawalStatus == 1:
+        if instance.withdrawalStatus != 1:
             raise ParamError("当前提现状态无法受理提现！")
         # 校验提现金额 大于1元 小于500元
         if instance.withdrawalMoney < 100:

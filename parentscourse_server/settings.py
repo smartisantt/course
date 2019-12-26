@@ -40,8 +40,10 @@ ALLOWED_HOSTS = [
     '192.168.100.194',
     '192.168.100.51',
     '192.168.100.115',
+    '192.168.100.254',
     '172.17.0.18',
-    '39.97.229.202'
+    '39.97.229.202',
+    '28eu182584.zicp.vip'
 ]
 
 # Application definition
@@ -71,6 +73,8 @@ INSTALLED_APPS = [
     'dwebsocket',
     'manager_distribution',
     'haystack',
+    'django_apscheduler',
+    'im_app',
 ]
 
 MIDDLEWARE = [
@@ -127,7 +131,7 @@ if version == 'debug':
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.mysql',  # 数据库引擎
-            'NAME': 'hbb_course',  # 储数据的库名
+            'NAME': 'hbb_course2',  # 储数据的库名
             'USER': 'root',  # 数据库用户名
             'PASSWORD': 'hbb123',  # 密码
             'HOST': '192.168.100.235',  # 主机
@@ -186,7 +190,7 @@ elif version == 'test':
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.mysql',  # 数据库引擎
-            'NAME': 'hbb_course',  # 储数据的库名
+            'NAME': 'hbb_course2',  # 储数据的库名
             'USER': 'root',  # 数据库用户名
             'PASSWORD': 'hbb123',  # 密码
             'HOST': '192.168.100.235',  # 主机
@@ -201,7 +205,7 @@ elif version == 'test':
         'default': {
             'BACKEND': 'django_redis.cache.RedisCache',
             'LOCATION': [
-                'redis://172.17.0.15:6379/0',
+                'redis://172.17.0.20:6379/0',
             ],  # redis服务ip和端口，
             'KEY_PREFIX': 'manage',
             'OPTIONS': {
@@ -214,7 +218,7 @@ elif version == 'test':
         'client': {
             'BACKEND': 'django_redis.cache.RedisCache',
             'LOCATION': [
-                'redis://172.17.0.15:6379/1',
+                'redis://172.17.0.20:6379/1',
             ],  # redis服务ip和端口，
             'KEY_PREFIX': 'client',
             'OPTIONS': {
@@ -230,7 +234,7 @@ elif version == 'test':
     HAYSTACK_CONNECTIONS = {
         'default': {
             'ENGINE': 'haystack.backends.elasticsearch_backend.ElasticsearchSearchEngine',
-            'URL': 'http://172.17.0.18:9200/',  # 此处为elasticsearch运行的服务器ip地址，端口号固定为9200
+            'URL': 'http://172.17.0.4:9200/',  # 此处为elasticsearch运行的服务器ip地址，端口号固定为9200
             'INDEX_NAME': 'hbb_course',  # 指定elasticsearch建立的索引库的名称
         },
     }
@@ -398,34 +402,37 @@ LOGGING = {
             'class': 'logging.StreamHandler',
             'level': 'DEBUG',
             'filters': ['require_debug_true'],
-            'formatter': 'simple',
+            'formatter': 'verbose',
         },
         # 输出到文件(每周切割一次)
         'file1': {
             'class': 'logging.handlers.TimedRotatingFileHandler',
-            'filename': 'access.log',
+            'filename': 'logs/access.log',
             'when': 'W0',
             'backupCount': 12,  # 备份份数
             'formatter': 'simple',  # 使用哪种formatters日志格式
             'level': 'DEBUG',
+            'encoding': 'utf-8',  # 设置默认编码
         },
         # 输出到文件(每天切割一次)
         'file2': {
             'class': 'logging.handlers.TimedRotatingFileHandler',
-            'filename': 'error.log',
+            'filename': 'logs/error.log',
             'when': 'D',
             'backupCount': 31,
             'formatter': 'verbose',
             'level': 'WARNING',
+            'encoding': 'utf-8',  # 设置默认编码
         },
         # 输出到文件(每周切割一次) -- 用户访问IP和访问的路径
         'file3': {
             'class': 'logging.handlers.TimedRotatingFileHandler',
-            'filename': 'ipandpath.log',
+            'filename': 'logs/ipandpath.log',
             'when': 'W0',
             'backupCount': 12,  # 备份份数
             'formatter': 'simple',  # 使用哪种formatters日志格式
             'level': 'INFO',
+            'encoding': 'utf-8',  # 设置默认编码
         },
     },
     # CRITICAL > ERROR > WARNING > INFO > DEBUG > NOTEST
@@ -455,13 +462,29 @@ REST_FRAMEWORK = {
     'DEFAULT_FILTER_BACKENDS': (
         'django_filters.rest_framework.DjangoFilterBackend',
     ),
+
+
+    'DEFAULT_THROTTLE_CLASSES': (
+        # 'rest_framework.throttling.AnonRateThrottle',
+        # 'rest_framework.throttling.UserRateThrottle'
+        'rest_framework.throttling.ScopedRateThrottle',  # throttle_scope = 'uploads'
+    ),
+    'DEFAULT_THROTTLE_RATES': {
+        # 'anon': '1/d',
+        # 'user': '5/m',
+        'sms': '5/d',
+    },
+
+
+
     # 重构renderer
     'DEFAULT_RENDERER_CLASSES': (
         'utils.renderer.MyJsonRenderer',
     ),
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'utils.auths.CustomAuthentication',
-        'utils.clientAuths.ClientAuthentication'
+        'utils.auths.IMAuthentication',
+        'utils.clientAuths.ClientAuthentication',
     ),
     'DEFAULT_PERMISSION_CLASSES': (
         'utils.auths.CustomAuthorization',
@@ -469,5 +492,4 @@ REST_FRAMEWORK = {
     'EXCEPTION_HANDLER': 'utils.exceptions.custom_exception_handler'
 }
 APPEND_SLASH = False
-
 

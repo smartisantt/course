@@ -11,8 +11,8 @@ from parentscourse_server.config import version
 APPID = "wx233ca74b3d313293"                            # 商户账号appid
 APIKEY = '1e5ddecea41cf3c8d86e609c1299dd81'             # 商户key
 create_ip = '192.168.100.235'
-# MCHID = '1532139641'                                    #
-MCHID = '1547729361'                                  # 商户号
+# MCHID = '1532139641'                                  #
+MCHID = '1547729361'                                    # 商户号
 
 
 if version == "debug":
@@ -23,6 +23,10 @@ elif version == "test":
     api_client_cert_path = "/usr/local/share/ca-certificates/apiclient_cert.pem"
     api_client_key_path = "/usr/local/share/ca-certificates/apiclient_key.pem"
     amount = 30
+elif version == "ali_test":
+    api_client_cert_path = ""   # 正式环境提现需要配置证书，微信后台配置需要添加api的ip
+    api_client_key_path = ""
+    amount = 0                  # 正式环境提现金额为真实退款金额，测试提现金额为0.3元
 
 
 def random_str(randomlength=8):

@@ -61,7 +61,7 @@ class UserView(viewsets.GenericViewSet,
         return Response(PUT_SUCCESS)
 
 
-
+# 作废
 @api_view(['POST'])
 def login(request):
     """

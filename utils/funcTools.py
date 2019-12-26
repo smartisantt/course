@@ -52,7 +52,6 @@ def create_session(user, token, loginIP):
     userInfo = {
         'nickName': user.nickName or '',
         'uuid': user.uuid,
-        'userId': user.userID,
         'tel': user.tel,
         'loginIp': loginIP
     }

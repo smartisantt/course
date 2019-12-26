@@ -8,22 +8,24 @@ class Chats(BaseModel):
     """
     聊天记录表
     """
-    expertUuid = models.ForeignKey(Experts, on_delete=models.CASCADE, null=True, related_name='expertChatsUuid',
-                                   to_field='uuid')  # 关联专家
     roomUuid = models.ForeignKey(ChatsRoom, on_delete=models.CASCADE, null=True,
                                  related_name='roomChatsUuid',
                                  to_field='uuid')  # 关联聊天室
-    # currPPTUuid = models.ForeignKey(CoursePPT, on_delete=models.CASCADE, null=True, related_name='PPTChatUuid',
-    #                                 to_field='uuid')  # 关联当前的单张PPT 修改将单张ppt url存储在content
-    userRole = models.IntegerField(choices=CHATS_USER_ROLE, default=1)  # 聊天室用户角色 1：用户 2：专家 3：主持人 4：嘉宾
+
+    fromAccountUuid = models.ForeignKey(User, on_delete=models.CASCADE, null=True,
+                                        related_name='roomUserUuid', to_field='uuid')  # 发送消息用户的uuid
+    userRole = models.CharField(choices=CHATS_USER_ROLE, default="normal", max_length=64, null=True)
+    # 聊天室用户角色 normal：用户 expert：专家 compere：主持人 inviter：嘉宾
     talkType = models.CharField(max_length=64, null=True)
-    # 发言类型 txt 文字 voice 音频 img 图片 ppt_pos PPT  qna 回答提问(上墙) del 删除  video 视频
-    content = models.TextField(null=True)  # 发言内容,如果是多媒体，存储地址
+    # 发言类型 txt 文字 voice 音频 img 图片 ppt_pos PPT  qna 回答提问(上墙)  video 视频
+    isQuestion = models.BooleanField(default=False, null=True)  # 是否是提问   只有普通用户和嘉宾可以提问
+    content = models.TextField(null=True)  # 发言消息体
     msgSeq = models.IntegerField(null=True)  # 消息序号
-    msgStatus = models.IntegerField(null=True)  # 对话状态(1-正常,2-撤回)
-    msgTime = models.BigIntegerField(null=True)  # 前端创建消息时间 时间戳 秒
+    msgStatus = models.IntegerField(null=True)  # 对话状态(1-正常,2-撤回,3-刪除)
+    msgTime = models.BigIntegerField(null=True)  # 前端创建消息时间 时间戳 毫秒
     duration = models.IntegerField(null=True)  # 语音时长，单位秒
-    # currPptId = models.IntegerField(null=True)  # 当前
+    displayPos = models.CharField(choices=CHATS_DISPLAY_POSE, null=True, max_length=64)  # 语音时长，单位秒
+    isWall = models.BooleanField(default=False)  # 默认不上墙
 
     o_ppt_id = models.IntegerField(default=0, null=True)  # 对接老数据的关联主键  ppt
     o_subject_id = models.IntegerField(default=0, null=True)  # 对接老数据的关联主键 ims_chat_subject
@@ -223,3 +225,32 @@ class CashAccount(BaseModel):
 
     class Meta:
         db_table = 'tb_cash_account'
+
+
+class LikeRoom(BaseModel):
+    """
+    用户对于课程行为表
+    """
+    userUuid = models.ForeignKey(User, on_delete=models.CASCADE, null=True, related_name='userLikeRoomUuid',
+                                 to_field='uuid')  # 关联用户
+    roomUuid = models.ForeignKey(ChatsRoom, on_delete=models.CASCADE, null=True, related_name='roomLikeUserUuid',
+                                 to_field='uuid')  # 直播间
+    type = models.IntegerField(default=1)  # 1收藏聊天室 2拥有权限
+    remarks = models.CharField(max_length=1024, null=True)  # 标记内容
+    isDelete = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = "tb_like_room"
+
+
+class BanSay(BaseModel):
+    """
+    用户禁言表
+    """
+    userUuid = models.CharField(max_length=64, null=True)  # 被禁言用户uuid
+    roomUuid = models.CharField(max_length=64, null=True)  # 被禁言聊天室uuid
+    expire = models.IntegerField(null=True)  # 被禁言时间 单位秒
+    status = models.IntegerField(default=1)  # 1禁言 2取消禁言
+
+    class Meta:
+        db_table = "tb_ban_say"

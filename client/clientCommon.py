@@ -10,6 +10,8 @@ import re
 import time
 import uuid
 
+from rest_framework.pagination import PageNumberPagination
+
 
 def get_token():
     """
@@ -156,9 +158,8 @@ def get_orderNO():
     :return:
     """
     start = datetime_to_string(datetime.datetime.now(), rule='%Y%m%d%H%M%S')
-    end = str(int(time.time() * 1000)) + str(int(time.clock() * 100000))
-    res = start + end
-    return res[:28]
+    end = str(int(time.time() * 10000))
+    return start + end
 
 
 def get_day_zero_time(date, btype="datetime"):
@@ -240,11 +241,18 @@ def is_valid_idcard(idcard):
     return ckcodes[copulas % 11].upper() == idcard[-1].upper()
 
 
+class MyPageNumberPagination(PageNumberPagination):
+    page_size = 10  # 默认两个
+    max_page_size = 100  # 一页显示最大5个
+    page_query_param = 'page'  # 页码
+
+
 if __name__ == "__main__":
     # print(random_string(6))
     # print(get_token())
-    print(get_orderNO(),len(get_orderNO()))
+    # print(get_orderNO(), len(get_orderNO()))
     # print(get_day_zero_time(datetime.datetime.today()))
     # print(get_day_latest_time(datetime.datetime.today()))
     # print(match_tel("W13333333333"))
     # print(is_valid_idcard(""))
+    print(is_valid_idcard("111111111111111111"))

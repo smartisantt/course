@@ -1,8 +1,10 @@
 import django_filters
+from django_filters.widgets import BooleanWidget
 
+from client.models import Chats
 from common.modelChoices import COURSE_TYPE_CHOICES, COURSES_PERMISSION_CHOICES, COURSES_FORBIDDEN_CHOICES, \
-    COURSESOURCE_TYPE_CHOICES, COURSE_UPDATE_STATUS
-from common.models import Courses, Chapters
+    COURSESOURCE_TYPE_CHOICES, COURSE_UPDATE_STATUS, CHATS_DISPLAY_POSE
+from common.models import Courses, Chapters, User
 from utils.timeTools import timeChange
 
 
@@ -44,7 +46,7 @@ class CourseFilter(django_filters.FilterSet):
 
 
 class ChapterFilter(django_filters.FilterSet):
-    courseUuid = django_filters.CharFilter("courseUuid",lookup_expr="exact")
+    courseUuid = django_filters.CharFilter("courseUuid", lookup_expr="exact")
     chapterName = django_filters.CharFilter("name", lookup_expr="icontains")
     serialNumber = django_filters.NumberFilter("serialNumber", lookup_expr="exact")
     status = django_filters.ChoiceFilter("status", choices=COURSES_FORBIDDEN_CHOICES)
@@ -63,3 +65,22 @@ class ChapterFilter(django_filters.FilterSet):
     class Meta:
         model = Chapters
         fields = "__all__"
+
+
+class DummyUserFilter(django_filters.FilterSet):
+    nickName = django_filters.CharFilter("nickName", lookup_expr="exact")
+
+    class Meta:
+        model = User
+        fields = "__all__"
+
+
+class ChatsHistoryFilter(django_filters.FilterSet):
+    # uuid = django_filters.CharFilter(method='filter_by_uuid')
+    displayPos = django_filters.ChoiceFilter(choices=CHATS_DISPLAY_POSE)
+    isQuestion = django_filters.BooleanFilter("isQuestion", widget=BooleanWidget())
+
+
+    class Meta:
+        model = Chats
+        fields = ("displayPos", "isQuestion")

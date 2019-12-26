@@ -18,13 +18,13 @@ from utils.errors import ParamError
 from utils.msg import POST_SUCCESS, REFUND_NOT_EXISTS, PUT_SUCCESS
 
 
+# 订单管理列表，这里有管理员操作订单退款的接口
 class OrderDetailView(viewsets.GenericViewSet,
                       mixins.ListModelMixin,
                       mixins.UpdateModelMixin,
                       mixins.CreateModelMixin,
                       mixins.DestroyModelMixin,
                       mixins.RetrieveModelMixin):
-
     queryset = OrderDetail.objects.all().select_related('orderUuid')
     serializer_class = OrderDetailSerializer
     filter_class = OrderDetailFilter
@@ -44,22 +44,29 @@ class OrderDetailView(viewsets.GenericViewSet,
     # 取消申请退款
     @transaction.atomic
     def destroy(self, request, *args, **kwargs):
-        # 删
         try:
             instance = self.get_object()
         except Exception as e:
             raise ParamError("子订单不存")
-        # 子订单 退款状态检查  等待处理或者财务不通过的退款
-        refund = instance.refundOrderDetailUuid.filter(refundMoneyStatus__in=[1, 3]).first()
+        # 子订单 退款状态检查  等待处理或者财务不通过的退款 payStatus   为3 才可以取消退款
+        if instance.orderUuid.payStatus != 3:
+            raise ParamError("没有可以取消申请退款的订单")
+        refund = instance.refundOrderDetailUuid.filter(refundMoneyStatus__in=[1, 3, 4]).first()
         if not refund:
             raise ParamError("没有可以取消申请退款的订单")
+
+        # 取消申请退款 payStatus变为已支付
+        order = instance.orderUuid
+        order.payStatus = 2
+        order.save()
+
         # 处理退款中，或者退款关闭 -》 取消退款
         # 退款记录表
         RefundOperation.objects.create(
             adminUserUuid=request.user,
             refundMoneyStatus=1,
             refundUuid=refund,
-            operation="{0}取消退款".format(request.user.nickName),
+            operation="{0}[{1}]取消退款申请".format(request.user.nickName, request.user.tel),
             remark=""
         )
         refund.refundMoneyStatus = 4
@@ -92,25 +99,9 @@ class RefundView(viewsets.GenericViewSet,
         except Exception as e:
             raise ParamError(REFUND_NOT_EXISTS)
 
-        try:
-            orderNum = instance.orderDetailUuid.orderUuid.orderNum
-            if not orderNum:
-                raise ParamError("没有订单编号")
-        except Exception as e:
-            raise ParamError("没有订单编号")
-
-        try:
-            payAmount = instance.orderDetailUuid.orderUuid.payAmount
-            if not payAmount:
-                raise ParamError("没有订单实际支付金额")
-        except Exception as e:
-            raise ParamError("没有订单实际支付金额")
-
-        if instance.refundMoney > payAmount:
-            raise ParamError("退款金额超出付款金额")
-
-        if not instance.refundMoneyStatus == 1:
+        if instance.refundMoneyStatus != 1:
             raise ParamError("当前退款状态无法修改！")
+
         serializers_data = RefundUpdateSerializer(data=request.data)
         result = serializers_data.is_valid(raise_exception=False)
         if not result:

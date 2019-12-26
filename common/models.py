@@ -97,10 +97,12 @@ class Courses(BaseModel):
     tags = models.ManyToManyField(Tags, related_name="courseTags")  # 课程标签
     coursePermission = models.IntegerField(choices=COURSES_PERMISSION_CHOICES, verbose_name="课程权限",
                                            null=True)  # 课程权限 1为免费，2为vip，3为精品课
-    updateStatus = models.IntegerField(choices=COURSE_UPDATE_STATUS, null=True, default=3)  # 课程更新状态1：已完结 2：更新中,3未开始
+    updateStatus = models.IntegerField(choices=COURSE_UPDATE_STATUS, null=True, default=3)
+    # 课程更新状态1：已完结 2：更新中,3未开始 4 直播结束 5 直播中  6 直播未开始
     gifts = models.ManyToManyField("Goods", related_name="giftCourse")
     keywords = models.CharField(max_length=512, verbose_name="关键词", null=True)  # 关键词(逗号分隔)
     vPopularity = models.IntegerField(verbose_name="虚拟人气", default=0)  # 虚拟人气
+    realPopularity = models.IntegerField(verbose_name="实际人气", default=0)  # 实际人气
     relatedCourse = models.ManyToManyField("self", related_name="courseRelate")
     mustRead = models.TextField(null=True)  # 购买须知，单独抽象出来一张表
     status = models.IntegerField(choices=COURSES_FORBIDDEN_CHOICES, default=1,
@@ -199,7 +201,8 @@ class Chapters(BaseModel):
     info = models.TextField(verbose_name="章节说明", null=True)  # 课程说明
     keywords = models.CharField(max_length=512, verbose_name="关键词", null=True)  # 关键词
     status = models.IntegerField(choices=COURSES_FORBIDDEN_CHOICES, default=1, null=True)
-    updateStatus = models.IntegerField(choices=COURSE_UPDATE_STATUS, null=True, default=3)  # 课程更新状态1：已完结 2：更新中,3未开始
+    updateStatus = models.IntegerField(choices=COURSE_UPDATE_STATUS, null=True, default=3)
+    # 课程更新状态1：已完结 2：更新中,3未开始 4 直播结束 5 直播中  6 直播未开始
     isTry = models.IntegerField(default=0, null=True)  # 1免费，0收费
     o_room_id = models.IntegerField(default=0, null=True)  # 对接老数据的关联主键 课程
     o_topic_id = models.IntegerField(default=0, null=True)  # 对接老数据的关联主键 章节
@@ -216,16 +219,22 @@ class Chapters(BaseModel):
 class ChatsRoom(BaseModel):
     """聊天室表"""
     name = models.CharField(max_length=255, null=True)  # 聊天室名称
+    huanxingId = models.CharField(max_length=64, null=True)  # 环信聊天室的ID
+    tmId = models.CharField(max_length=64, null=True)  # 腾讯聊天室的ID
     studyNum = models.IntegerField(null=True)  # 学习次数
     startTime = models.BigIntegerField(null=True)  # 开始时间
+    actualStartTime = models.BigIntegerField(null=True)  # 实际开始时间
+    liveStatus = models.IntegerField(choices=LIVE_STATUS_CHOICES, default=1)  # 直播状态
     endTime = models.BigIntegerField(null=True)  # 结束时间
     banner = models.CharField(max_length=512, null=True)  # 聊天室列表图
     liveCourseUuid = models.ForeignKey('LiveCourse', on_delete=models.CASCADE, related_name='liveCourseChatsRoom',
-                                       to_field='uuid',  null=True)  # 直播课件uuid
+                                       to_field='uuid', null=True)  # 直播课件uuid
     mcUuid = models.ForeignKey("User", on_delete=models.CASCADE, to_field="uuid", related_name="roomMcUuid",
                                null=True)  # 主持人
     inviterUuid = models.ManyToManyField("User", verbose_name="嘉宾",
                                          related_name="roomInviterUuid")  # 嘉宾
+    ownerUuid = models.ForeignKey("User", verbose_name="环信建群的人", on_delete=models.CASCADE, null=True,
+                                  related_name="roomOwnerUuid")  # 环信建群的人
     expertUuid = models.ForeignKey("Experts", on_delete=models.CASCADE, to_field="uuid",
                                    related_name="roomExpertUuid",
                                    verbose_name="专家", null=True)
@@ -290,9 +299,10 @@ class Experts(BaseModel):
     isStar = models.BooleanField(default=False, null=True)  # 明星专家，默认为0不是明星专家
     intro = models.CharField(max_length=1024, null=True)  # 专家介绍
     careerInfo = models.CharField(max_length=1024, null=True)  # 专家介绍
-    enable = models.BooleanField(default=0, null=True)  # 禁用状态，默认不禁用
+    enable = models.BooleanField(default=True)  # 禁用状态，默认不禁用
     o_expert_id = models.IntegerField(default=0, null=True)  # 对接老数据的关联主键
     o_user_id = models.IntegerField(null=True)  # 对接老数据的关联主键
+    isRegisterHuanxin = models.BooleanField(default=False, null=True)  # 该用户是否注册环信账号 用户名：用户的uuid 密码：用户的uuid+hxpwd
 
     class Meta:
         db_table = "tb_experts"
@@ -313,6 +323,7 @@ class Mc(BaseModel):
     specialty = models.CharField(max_length=1024, null=True)  # 主持人特长
     o_compere_id = models.IntegerField(default=0)  # 对接老数据的关联主键
     o_user_id = models.IntegerField(default=0)  # 对接老数据的关联主键 用户的id
+    isRegisterHuanxin = models.BooleanField(default=False, null=True)  # 该用户是否注册环信账号 用户名：用户的uuid 密码：用户的uuid+hxpwd
 
     class Meta:
         db_table = "tb_mc"
@@ -335,6 +346,7 @@ class Shares(BaseModel):
     realPrice = models.BigIntegerField(verbose_name="课程价格", null=True)  # 课程价格 单位分
     rewardPercent = models.FloatField(validators=[MinValueValidator(0), MaxValueValidator(100)], null=True)  # 提成比列
     shareType = models.IntegerField(default=0)  # 分享类型,预留
+    shareImg = models.CharField(max_length=1024, null=True)  # 分型图片地址
 
     class Meta:
         db_table = "tb_shares"
@@ -389,7 +401,7 @@ class Orders(BaseModel):
     orderPrice = models.BigIntegerField(null=True)  # 应付金额  (原价 - 优惠卷)
     payAmount = models.BigIntegerField(null=True)  # 实付金额   (应付金额-使用积分)
     payType = models.IntegerField(choices=PAY_CHOICES, default=1, null=True)  # 付款方式
-    endTime = models.IntegerField(null=True)                                # 订单完成时间
+    endTime = models.IntegerField(null=True)  # 订单完成时间
     orderStatus = models.IntegerField(choices=ORDER_STATUS_CHOICES, default=1, null=True)  # 订单状态
     payStatus = models.IntegerField(choices=PAY_STATUS_CHOICES, default=1, null=True)  # 支付状态
     couponUuid = models.CharField(max_length=255, null=True)  # 使用优惠券uuid， 多个优惠卷
@@ -462,13 +474,13 @@ class Payment(BaseModel):
     """
     orderNum = models.OneToOneField("Orders", on_delete=models.CASCADE, to_field="orderNum",
                                     related_name="orderNumPayment", null=True)  # 订单号
-    payWay = models.CharField(max_length=32, null=True)  # 支付方式代码
+    payWay = models.CharField(max_length=32, null=True)  # 支付方式代码 “WXPAY” 微信支付
     payWayName = models.CharField(max_length=32, null=True)  # 支付方式名称  微信支付 苹果内购
     partner = models.CharField(max_length=64, null=True)  # 微信支付相关秘钥？
     payTransNo = models.CharField(max_length=64, null=True)  # 交易流水号
     payStatus = models.BooleanField(default=0)  # 是否付款
     payAmount = models.BigIntegerField(null=True)  # 支付金额
-    payTime = models.BigIntegerField(null=True)  # 支付时间
+    payTime = models.BigIntegerField(null=True)  # 支付时间 毫秒时间戳
     payType = models.IntegerField(null=True)  # 支付类型 1现金 4积分
     cardNo = models.CharField(max_length=64, null=True)  # 优惠卡号
     usedPoints = models.IntegerField(null=True)  # 积分
@@ -542,7 +554,7 @@ class TelAuth(BaseModel):
     salt = models.CharField(max_length=32, null=True)  # 加密使用
     passwd = models.CharField(max_length=255, null=True)  # 新密码
     status = models.IntegerField(choices=USER_STATUS_CHOICES, default=1)  # 前端用户状态
-    userSource = models.IntegerField(choices=USER_SOURCE_TYPE, default=1)  # 用户来源 1数据迁移 2新注册 3迁移并登录过
+    userSource = models.IntegerField(choices=USER_SOURCE_TYPE, default=1)  # 用户来源 1数据迁移 2新注册 3迁移并登录过 4后台添加
 
     class Meta:
         db_table = "tb_tel_auth"
@@ -553,7 +565,6 @@ class User(BaseModel):
      用户表
     """
     userNum = models.IntegerField(auto_created=True, unique=True, null=True)  # 自增非主键用户号
-    userID = models.CharField(max_length=64, null=True)  # 公共登录对接的用户ID
     nickName = models.CharField(max_length=32, blank=True, null=True)
     email = models.CharField(max_length=255, blank=True, null=True)
     realName = models.CharField(max_length=32, blank=True, null=True)
@@ -573,25 +584,25 @@ class User(BaseModel):
     isShopper = models.BooleanField(default=False)  # 是否是店主
     o_user_id = models.CharField(max_length=64, null=True)  # 好呗呗用户id
     location = models.CharField(max_length=64, null=True)  # 所在省市区
-    isAudit = models.IntegerField(null=True, default=1)  # 是否通过审核 1：通过 2：未通过
-    isActive = models.IntegerField(null=True, default=1)  # 是否激活 1：激活 2：未激活
-    identity = models.IntegerField(null=True, default=1)  # 身份标识（1：用户，2：组织）
     intro = models.CharField(max_length=255, null=True)  # 户用简介
     userRoles = models.IntegerField(choices=USER_ROLE_CHOICES, default=3)  # 用户角色
-    password = models.CharField(max_length=255, null=True)  # 密码 老数据存的密码
     passwd = models.CharField(max_length=255, null=True)  # 新密码
-    salt = models.CharField(max_length=32, null=True)  # 加密使用
     openid = models.CharField(max_length=64, null=True)  # 微信登录openid
     unionid = models.CharField(max_length=64, null=True)  # 微信登录unionid
     income = models.BigIntegerField(default=0)  # 累计收益
     banlance = models.BigIntegerField(default=0)  # 收益余额
     registerPlatform = models.IntegerField(choices=USER_REGISTER_CHOICES, null=True, default=4)  # 用户注册平台
-    userSource = models.IntegerField(choices=USER_SOURCE_TYPE, default=1)   # 用户来源 1数据迁移 2新注册 3迁移并登录过
-    idCard = models.CharField(max_length=255, null=True)                    # 身份证号
-    tradePwd = models.CharField(max_length=255, null=True)                  # 交易密码
+    idCard = models.CharField(max_length=255, null=True)  # 身份证号
+    tradePwd = models.CharField(max_length=255, null=True)  # 交易密码
+    isRegisterHuanxin = models.BooleanField(default=False, null=True)  # 该用户是否注册环信账号 用户名：用户的uuid 密码：用户的uuid+hxpwd
+    circleImg = models.CharField(max_length=1024, null=True)  # 圆角头像地址
+    isMajia = models.BooleanField(default=False)  # 是否是马甲用户
 
     class Meta:
         db_table = 'tb_user'
+
+    # def is_authenticated(self):
+    #     return True
 
     def __str__(self):
         return self.nickName
@@ -616,7 +627,7 @@ class Coupons(BaseModel):
     status = models.IntegerField(choices=COUPONS_STATUS_CHOICES, default=1)  # 优惠券状态
     isPromotion = models.BooleanField(default=False, null=True)  # 促销商品 + 优惠卷 叠加使用
     # courseUuid = models.ForeignKey(Courses, on_delete=models.CASCADE, null=True,
-    #                                related_name="courseCouponsUuid")  # 课程uuid  单品卷管理的课程
+    #                                related_name="courseCouponsUuid")              # 课程uuid  单品卷管理的课程
     goodsUuid = models.ForeignKey(Goods, on_delete=models.CASCADE, null=True,
                                   related_name="goodsCouponsUuid")  # 课程uuid  商品的优惠卷
 
@@ -651,7 +662,8 @@ class Bill(BaseModel):
     """
     交易流水表
     """
-    userUuid = models.ForeignKey("User", on_delete=models.CASCADE, to_field="uuid", related_name="userBillUuid")  # 用户
+    userUuid = models.ForeignKey(User, on_delete=models.CASCADE, to_field="uuid", related_name="userBillUuid",
+                                 null=True)  # 用户
     billType = models.IntegerField(choices=BILL_TYPE_CHOICES, default=2)  # 流水类型
     remarks = models.CharField(max_length=512, null=True)  # 流水备注
     money = models.BigIntegerField(verbose_name="收益支出数值")  # 金额(单位分)
@@ -693,14 +705,14 @@ class MemberCard(BaseModel):
 
 class UserMember(BaseModel):
     """
-    用户会员表(ims_user_member)
+    VIP表(ims_user_member)
     """
     userUuid = models.ForeignKey("User", on_delete=models.CASCADE, to_field="uuid", related_name="userMemberInfo",
                                  null=True)  # 关联用户
     startTime = models.BigIntegerField(null=True)  # 会员开始时间
     endTime = models.BigIntegerField(null=True)  # 会员结束时间
     o_user_id = models.CharField(max_length=64, null=True)  # 好呗呗表id
-    remarks = models.CharField(max_length=64,null=True) # 来源
+    remarks = models.CharField(max_length=64, null=True)  # 来源
 
     class Meta:
         db_table = "tb_user_member"
@@ -779,23 +791,16 @@ class Withdrawal(BaseModel):
     提现记录表
     """
     userUuid = models.ForeignKey("User", on_delete=models.CASCADE, to_field="uuid", related_name="userWithdrawalUuid",
-                                 null=True)                         # 关联用户
-    withdrawalMoney = models.IntegerField(null=True)                # 申请提现金额
-    arrivalAccountTime = models.DateTimeField(null=True)            # 实际到帐时间
-    preArrivalAccountTime = models.DateTimeField(null=True)         # 预计到帐时间
-    withdrawalStatus = models.IntegerField(choices=CASH_WITHDRAWAL_STATUS_CHOICES, null=True)  # 提现状态
-    withdrawalType = models.IntegerField(choices=CASH_WITHDRAWAL_TYPE_CHOICES, null=True)  # 提现方式   暂时仅支持微信
-
-    # realName = models.CharField(max_length=20)                  # 真实姓名
-    # idCard = models.CharField(max_length=32, null=True)         # 身份证号
-    # bank = models.CharField(max_length=256, null=True)          # 开户银行
-    # bankCardNo = models.CharField(max_length=256, null=True)    # 银行卡卡号
-    # alipayAccount = models.CharField(max_length=256, null=True) # 支付宝账号
-    wxAccount = models.CharField(max_length=256, null=True)     # 微信账号，存微信的openId
-    # freezeingMoney = models.IntegerField(null=True)             # 冻结金额
-    serviceCharge = models.IntegerField(null=True)              # 转账手续费
-    billNum = models.CharField(max_length=512, null=True)       # 交易流水 微信提现成功存储 付款单号payment_no
-    remarks = models.CharField(max_length=512, null=True)       # 未通过原因
+                                 null=True)  # 关联用户
+    withdrawalMoney = models.IntegerField(null=True)  # 申请提现金额
+    arrivalAccountTime = models.DateTimeField(null=True)  # 实际到帐时间
+    preArrivalAccountTime = models.DateTimeField(null=True)  # 预计到帐时间  写死： 0 - 2 个工作日
+    withdrawalStatus = models.IntegerField(choices=CASH_WITHDRAWAL_STATUS_CHOICES, null=True, default=1)  # 提现状态
+    withdrawalType = models.IntegerField(choices=CASH_WITHDRAWAL_TYPE_CHOICES, null=True)  # 提现方式   暂时仅支持微信 2
+    wxAccount = models.CharField(max_length=256, null=True)  # 微信账号，存微信的openId
+    serviceCharge = models.IntegerField(null=True)  # 转账手续费
+    billNum = models.CharField(max_length=512, null=True)  # 交易流水 微信提现成功存储 付款单号payment_no
+    remarks = models.CharField(max_length=512, null=True)  # 未通过原因
 
     class Meta:
         db_table = "tb_withdrawal"
@@ -822,15 +827,14 @@ class Refund(BaseModel):
     #                               to_field="uuid", related_name='refundOrderUuid')  # 关联的 父订单表
     orderDetailUuid = models.ForeignKey(OrderDetail, null=True, on_delete=models.CASCADE,
                                         to_field="uuid", related_name='refundOrderDetailUuid')  # 关联的 子订单表
-    refundMoney = models.IntegerField(null=True)                                                # 申请退款的金额
-    refundReason = models.CharField(max_length=255, null=True)                                  # 退款原因
-    refundMoneyStatus = models.IntegerField(choices=REFUND_MONEY_STATUS_CHOICES, default=1)     # 退款状态
-    refundMoneyWay = models.IntegerField(choices=REFUND_MONEY_WAY_CHOICES, default=1)           # 退款返回路径 , 暂时只支持微信
+    refundMoney = models.IntegerField(null=True)  # 申请退款的金额
+    refundReason = models.CharField(max_length=255, null=True)  # 退款原因
+    refundMoneyStatus = models.IntegerField(choices=REFUND_MONEY_STATUS_CHOICES, default=1)  # 退款状态
+    refundMoneyWay = models.IntegerField(choices=REFUND_MONEY_WAY_CHOICES, default=1)  # 退款返回路径 , 暂时只支持微信
     creatorUuid = models.ForeignKey("User", on_delete=models.CASCADE, to_field="uuid",
-                                    related_name="creatorUserUuid", null=True)                  # 发起人
-
+                                    related_name="creatorUserUuid", null=True)  # 发起人
     receiverUuid = models.ForeignKey("User", on_delete=models.CASCADE, to_field="uuid",
-                                     related_name="receiverUserUuid", null=True)                # 受理人
+                                     related_name="receiverUserUuid", null=True)  # 受理人
 
     class Meta:
         db_table = 'tb_refund'
@@ -918,12 +922,12 @@ class LiveCourseBanner(BaseModel):
     name = models.CharField(max_length=255, null=True)  # banner素材名字
     sourceUrl = models.CharField(max_length=1024, null=True)  # banner素材地址,
     sourceType = models.IntegerField(null=True, choices=LIVE_COURSE_BANNER_TYPE_CHOICES)
-    fileSize = models.IntegerField(null=True)                               # 课件大小
-    duration = models.IntegerField(null=True)                               # 课件时长， 针对音频视频
-    enable = models.BooleanField(default=True, null=True)                   # 是否被禁用，0为禁用，1为启用
-    pages = models.IntegerField(null=True)                                  # PPT页数
-    o_topic_id = models.IntegerField(default=0, null=True)                  # 对接老数据的关联主键  课件
-    o_media_id = models.IntegerField(default=0, null=True)                  # 对接老数据的关联主键  音频 视频
+    fileSize = models.IntegerField(null=True)  # 课件大小
+    duration = models.IntegerField(null=True)  # 课件时长， 针对音频视频
+    enable = models.BooleanField(default=True, null=True)  # 是否被禁用，0为禁用，1为启用
+    pages = models.IntegerField(null=True)  # PPT页数
+    o_topic_id = models.IntegerField(default=0, null=True)  # 对接老数据的关联主键  课件
+    o_media_id = models.IntegerField(default=0, null=True)  # 对接老数据的关联主键  音频 视频
 
     class Meta:
         db_table = "tb_live_course_banner"
@@ -932,14 +936,14 @@ class LiveCourseBanner(BaseModel):
 class LiveCourseMsg(BaseModel):
     # 直播课发送课件集合表(多)
     liveCourseUuid = models.ForeignKey("LiveCourse", on_delete=models.CASCADE, null=True,
-                                       related_name='liveCourseMsgUuid', to_field='uuid')      # 消息集合
-    name = models.CharField(max_length=256, null=True)                              # 单条消息内容名称
-    sourceUrl = models.CharField(max_length=1024, null=True)                        # 课件地址
-    sourceType = models.IntegerField(choices=LIVE_SOURCE_MSG_TYPE_CHOICES, null=True)   # 课件类型
-    fileSize = models.IntegerField(null=True)                                       # 课件大小，单位kb
-    sortNum = models.IntegerField(default=0)                                        # 排列顺序 越小越靠前面
+                                       related_name='liveCourseMsgUuid', to_field='uuid')  # 消息集合
+    name = models.CharField(max_length=256, null=True)  # 单条消息内容名称
+    sourceUrl = models.CharField(max_length=1024, null=True)  # 课件地址
+    sourceType = models.IntegerField(choices=LIVE_SOURCE_MSG_TYPE_CHOICES, null=True)  # 课件类型
+    fileSize = models.IntegerField(null=True)  # 课件大小，单位kb
+    sortNum = models.IntegerField(default=0)  # 排列顺序 越小越靠前面
     enable = models.BooleanField(default=True)  # 默认1  启用
-    duration = models.IntegerField(null=True, default=0)               # 课程时长单位秒
+    duration = models.IntegerField(null=True, default=0)  # 课程时长单位秒
 
     class Meta:
         db_table = "tb_live_course_msg"
@@ -960,29 +964,29 @@ class WxEnterprisePaymentToWallet(BaseModel):
     # 微信企业付款到零钱
     mch_appid = models.CharField(max_length=256, null=True)
     mchid = models.CharField(max_length=32, null=True)
-    device_info = models.CharField(max_length=32, null=True)        # 设备号，这里存操作人的uuid
+    device_info = models.CharField(max_length=32, null=True)  # 设备号，这里存操作人的uuid
     partner_trade_no = models.CharField(max_length=32,
-                                        null=True, unique=True)     # 商户订单号 只能是字母或者数字，不能包含有其他字符
-                                                                    # 存放提现 或者 退款的 uuid
-    openid = models.CharField(max_length=32, null=True)             # 商户appid下，某用户的openid
-    re_user_name = models.CharField(max_length=64, null=True)       # 收款用户真实姓名。
-    desc = models.CharField(max_length=256, null=True)              # 企业付款备注，必填。注意：备注中的敏感词会被转成字符*
+                                        null=True, unique=True)  # 商户订单号 只能是字母或者数字，不能包含有其他字符
+    # 存放提现 或者 退款的 uuid
+    openid = models.CharField(max_length=32, null=True)  # 商户appid下，某用户的openid
+    re_user_name = models.CharField(max_length=64, null=True)  # 收款用户真实姓名。
+    desc = models.CharField(max_length=256, null=True)  # 企业付款备注，必填。注意：备注中的敏感词会被转成字符*
     spbill_create_ip = models.CharField(max_length=256, null=True)  # IP地址
-    amount = models.IntegerField(null=True)                         # 企业付款金额，单位为分
-    payment_no = models.CharField(max_length=256, null=True)        # 企业付款成功，返回的微信付款单号
-    remark = models.CharField(max_length=256, null=True)            # 企业付款成功，返回的微信付款单号
-    payment_time = models.DateTimeField(null=True)                  # 企业付款成功时间
+    amount = models.IntegerField(null=True)  # 企业付款金额，单位为分
+    payment_no = models.CharField(max_length=256, null=True)  # 企业付款成功，返回的微信付款单号
+    remark = models.CharField(max_length=256, null=True)  # 企业付款成功，返回的微信付款单号
+    payment_time = models.DateTimeField(null=True)  # 企业付款成功时间
 
     class Meta:
         db_table = "tb_enterprise_payment_to_wallet"
 
 
 class YunxinChatroom(BaseModel):
-    creator = models.CharField(max_length=64, null=True)        # 聊天室属主的账号accid
+    creator = models.CharField(max_length=64, null=True)  # 聊天室属主的账号accid
     roomid = models.CharField(max_length=64, null=True)
-    name = models.CharField(max_length=128, null=True)          # 聊天室名称，长度限制128个字符
+    name = models.CharField(max_length=128, null=True)  # 聊天室名称，长度限制128个字符
     broadcasturl = models.CharField(max_length=128, null=True)  # 直播地址，长度限制1024个字符
-    announcement = models.CharField(max_length=1024, null=True) # 公告，长度限制4096个字符
+    announcement = models.CharField(max_length=1024, null=True)  # 公告，长度限制4096个字符
     # 聊天室是否处于全体禁言状态，全体禁言时仅管理员和创建者可以发言
     muted = models.BooleanField(max_length=1024, null=True)
     # 队列管理权限：0:所有人都有权限变更队列，1:只有主播管理员才能操作变更。默认0
@@ -996,10 +1000,36 @@ class YunxinAuth(BaseModel):
     """网易云信用户"""
     userUuid = models.ForeignKey("User", on_delete=models.CASCADE,
                                  related_name='userYunxinUuid', to_field='uuid', null=True)  # 关联用户
-    accid = models.CharField(max_length=32, null=False, unique=True)                         # 网易云通信ID，最大长度32字符，必须保证一个
-    name = models.CharField(max_length=64, null=True)                                        # 微信用户名
-    gender = models.IntegerField(choices=YUNXIN_GENDER_CHOICES, default=0)                   # 微信用户性别
-    icon = models.CharField(max_length=512, blank=True, null=True)                           # 用户头像
+    accid = models.CharField(max_length=32, null=False, unique=True)  # 网易云通信ID，最大长度32字符，必须保证一个
+    name = models.CharField(max_length=64, null=True)  # 微信用户名
+    gender = models.IntegerField(choices=YUNXIN_GENDER_CHOICES, default=0)  # 微信用户性别
+    icon = models.CharField(max_length=512, blank=True, null=True)  # 用户头像
 
     class Meta:
         db_table = "tb_yunxin_auth"
+
+
+class PayLog(BaseModel):
+    """支付日志表"""
+
+    userUuid = models.ForeignKey("User", on_delete=models.CASCADE,
+                                 related_name='paylogUserUuid', to_field='uuid', null=True)  # 关联用户
+    appid = models.CharField(null=True, max_length=64)
+    mch_id = models.CharField(null=True, max_length=64)
+    nonce_str = models.CharField(null=True, max_length=64)
+    sign_type = models.CharField(null=True, max_length=64)
+    body = models.CharField(null=True, max_length=512)
+    out_trade_no = models.CharField(null=True, max_length=64)
+    fee_type = models.CharField(null=True, max_length=64)
+    total_fee = models.IntegerField(null=True)
+    spbill_create_ip = models.CharField(null=True, max_length=64)
+    goods_tag = models.CharField(null=True, max_length=64)
+    notify_url = models.CharField(null=True, max_length=255)
+    trade_type = models.CharField(null=True, max_length=64)
+    product_id = models.CharField(null=True, max_length=64)
+    openid = models.CharField(null=True, max_length=255)
+    device_info = models.CharField(null=True, max_length=64)
+    sign = models.CharField(null=True, max_length=512)
+
+    class Meta:
+        db_table = "tb_pay_log"

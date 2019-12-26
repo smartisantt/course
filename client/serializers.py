@@ -1,14 +1,16 @@
 import logging
 from datetime import datetime
 
+import requests
 from django.db.models import F
 from rest_framework import serializers
 
 from client.clientCommon import match_tel, get_default_name, datetime_to_unix, unix_time_to_datetime
-from client.insertQuery import if_study_course
+from client.insertQuery import if_study_course, get_user_role
 from client.models import *
 from client.queryFilter import q6, qRange, q4
 from client.search_indexes import CoursesIndex
+from parentscourse_server.config import IM_PLATFORM, DEFAULT_AVATAR
 from utils.errors import ParamError
 from drf_haystack.serializers import HaystackSerializer
 
@@ -50,7 +52,7 @@ class IndexExpertSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Experts
-        fields = ("name", "uuid", "hospital", "avatar", "department", "jobTitle")
+        fields = ("name", "uuid", "hospital", "avatar", "department", "jobTitle", "enable")
 
 
 class CourseListSerializer(serializers.ModelSerializer):
@@ -64,6 +66,10 @@ class CourseListSerializer(serializers.ModelSerializer):
     startTime = serializers.SerializerMethodField(read_only=True)
     endTime = serializers.SerializerMethodField(read_only=True)
     chapterStyle = serializers.SerializerMethodField(read_only=True)
+    coursePermission = serializers.SerializerMethodField(read_only=True)
+
+    def get_coursePermission(self, obj):
+        return obj.coursePermission if obj.coursePermission else 1
 
     def get_chapterStyle(self, obj):
         return obj.chapterCourseUuid.first().chapterStyle if obj.chapterCourseUuid.first() else 2
@@ -116,7 +122,7 @@ class CourseListSerializer(serializers.ModelSerializer):
         model = Courses
         fields = (
             "name", "startTime", "endTime", "icon", "intro", "originalPrice", "realPrice", "courseType", "duration",
-            "expert", "uuid", "vPopularity", "discount", "chapterStyle")
+            "expert", "uuid", "vPopularity", "discount", "chapterStyle", "coursePermission", "status")
 
 
 class SectionSerializer(serializers.ModelSerializer):
@@ -152,6 +158,17 @@ class ChaptersSerializer(serializers.ModelSerializer):
     tryInfo = serializers.SerializerMethodField(read_only=True)
     duration = serializers.SerializerMethodField(read_only=True)
     isTry = serializers.SerializerMethodField(read_only=True)
+    liveSatus = serializers.SerializerMethodField(read_only=True)
+
+    def get_liveSatus(self, obj):
+        if not obj.roomUuid:
+            return None
+        status = 1
+        if obj.roomUuid.startTime <= datetime_to_unix(datetime.now()):
+            status = 2
+        if obj.roomUuid.endTime:
+            status = 3
+        return status
 
     def get_duration(self, obj):
         if obj.courseSourceUuid and obj.courseSourceUuid.duration:
@@ -159,15 +176,12 @@ class ChaptersSerializer(serializers.ModelSerializer):
         return 0
 
     def get_isTry(self, obj):
-        if obj.tryInfoUuid or obj.isTry == 1:
+        if obj.tryInfoUuid:
             return True
         return False
 
-    @staticmethod
-    def get_tryInfo(obj):
+    def get_tryInfo(self, obj):
         objInfo = obj.tryInfoUuid
-        if not objInfo and obj.isTry == 1:
-            objInfo = obj.courseSourceUuid
         if not objInfo:
             return None
         return CourseSourceSerializer(objInfo).data
@@ -176,15 +190,7 @@ class ChaptersSerializer(serializers.ModelSerializer):
         model = Chapters
         fields = (
             "uuid", "name", "tryInfo", "serialNumber", "chapterStyle", "duration", "startTime", "endTime",
-            "chapterBanner", "info", "isTry")
-
-
-class CouponsSerializer(serializers.ModelSerializer):
-    """优惠券序列化"""
-
-    class Meta:
-        model = Coupons
-        fields = ("uuid", "name", "source", "remarks", "accountMoney", "money", "startTime", "endTime")
+            "chapterBanner", "info", "isTry", "liveSatus")
 
 
 class CourseSerializer(CourseListSerializer):
@@ -199,10 +205,26 @@ class CourseSerializer(CourseListSerializer):
     discount = serializers.SerializerMethodField(read_only=True)
     goodsUuid = serializers.SerializerMethodField(read_only=True)
     haveTry = serializers.SerializerMethodField(read_only=True)
+    userCoupon = serializers.SerializerMethodField(read_only=True)
+
+    def get_userCoupon(self, obj):
+        good = Goods.objects.filter(content=obj.uuid).first()
+        if not good:
+            return None
+        coupon = good.goodsCouponsUuid.filter(couponType=1).first()
+        if not coupon:
+            return None
+        request = self.context["request"]
+        userUuid = request.user.get("uuid")
+        userCoupon = UserCoupons.objects.filter(userUuid__uuid=userUuid, couponsUuid__uuid=coupon.uuid,
+                                                status=1).first()
+        if not userCoupon:
+            return None
+        return UserCouponsSerializer(userCoupon, many=False, context={"request": request}).data
 
     def get_haveTry(self, obj):
         for chapter in obj.chapterCourseUuid.all():
-            if chapter.tryInfoUuid or chapter.isTry == 1:
+            if chapter.tryInfoUuid:
                 return True
         return False
 
@@ -245,7 +267,7 @@ class CourseSerializer(CourseListSerializer):
 
     def get_coupons(self, obj):
         goods = Goods.objects.filter(content=obj.uuid).first()
-        if not goods:
+        if not goods or not goods.isCoupon:
             return None
         objInfo = goods.goodsCouponsUuid.filter(q6).filter(couponType=1, totalNumber__gt=F("receivedNumber")).first()
         if not objInfo:
@@ -253,38 +275,46 @@ class CourseSerializer(CourseListSerializer):
         return CouponsSerializer(objInfo, many=False, context={"request": self.context["request"]}).data
 
     def get_canStudy(self, obj):
-        selfUuid = self.context["request"].user.get("uuid")
-        user = User.objects.filter(uuid=selfUuid).first()
-        behavior = Behavior.objects.filter(userUuid__uuid=user.uuid, courseUuid__uuid=obj.uuid, behaviorType=5).first()
+        user = self.context["request"].user.get("userObj")
+        behavior = Behavior.objects.filter(userUuid__uuid=user.uuid, courseUuid__uuid=obj.uuid, behaviorType=5,
+                                           isDelete=False).first()
         if not if_study_course(obj, user, behavior):
             return False
         return True
 
     def get_share(self, obj):
-        selfUuid = self.context["request"].user.get("uuid")
-        user = User.objects.filter(uuid=selfUuid).first()
         goods = Goods.objects.filter(content=obj.uuid).first()
         if not goods or not goods.rewardStatus:
             return None
-        data = {
-            "shareUrl": obj.shareUrl,
-            "shareImg": obj.shareImg,
-            "avatar": user.avatar,
-            "userUuid": user.uuid,
-            "nickName": user.nickName,
-            "realPrice": goods.realPrice,
-            "rewardPercent": goods.rewardPercent,
-            "courseUuid": obj.uuid
-        }
-        return data
+        shareMoney = float(int(goods.realPrice * goods.rewardPercent * 10 / 10000) / 10)
+        return shareMoney
 
     class Meta:
         model = Courses
         fields = (
             "name", "startTime", "endTime", "icon", "intro", "originalPrice", "realPrice", "courseType", "duration",
             "expert", "uuid", "vPopularity", "chapters", "coupons", "info", "canStudy", "haveTry",
-            "isLike", "share", "discount", "goodsUuid", "infoType", "coursePermission", "preChapter")
+            "isLike", "share", "discount", "goodsUuid", "infoType", "coursePermission", "preChapter", "userCoupon",
+            "mustRead")
         depth = 4
+
+
+class WechatSerializer(serializers.ModelSerializer):
+    """微信信息序列化"""
+    nickName = serializers.SerializerMethodField(read_only=True)
+
+    def get_nickName(self, obj):
+        return obj.name
+
+    def get_avatar(self, obj):
+        r = requests.get(obj.avatar)
+        if r.status_code != 200:
+            return DEFAULT_AVATAR
+        return obj.avatar
+
+    class Meta:
+        model = WechatAuth
+        fields = ("uuid", "nickName", "sex", "avatar")
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -297,6 +327,15 @@ class UserSerializer(serializers.ModelSerializer):
     telInfo = serializers.SerializerMethodField(read_only=True)
     wechatInfo = serializers.SerializerMethodField(read_only=True)
     isReal = serializers.SerializerMethodField(read_only=True)
+    avatar = serializers.SerializerMethodField(read_only=True)
+
+    def get_avatar(self, obj):
+        if not obj.avatar:
+            return DEFAULT_AVATAR
+        r = requests.get(obj.avatar)
+        if r != 200:
+            return DEFAULT_AVATAR
+        return obj.avatar
 
     def get_isReal(self, obj):
         if not all([obj.realName, obj.idCard, obj.tradePwd]):
@@ -316,13 +355,7 @@ class UserSerializer(serializers.ModelSerializer):
     def get_wechatInfo(self, obj):
         if not obj.userWechatUuid.first():
             return None
-        info = {
-            "uuid": obj.userWechatUuid.first().uuid,
-            "nickName": obj.userWechatUuid.first().name,
-            "sex": obj.userWechatUuid.first().sex,
-            "avatar": obj.userWechatUuid.first().avatar,
-        }
-        return info
+        return WechatSerializer(obj.userWechatUuid.first(), many=False).data
 
     def get_banlance(self, obj):
         return obj.banlance if obj.banlance else 0
@@ -506,11 +539,11 @@ class LiveCourseBannerSerializer(serializers.ModelSerializer):
     @staticmethod
     def get_url(obj):
         objInfo = obj.sourceUrl
-        if obj.sourceUrl == None and obj.sourceType == 3:
+        if obj.sourceType == 3:
             listInfo = []
             for bi in obj.courseSourcePpt.filter(enable=True).order_by("sortNum").all():
                 listInfo.append(bi.imgUrl)
-            objInfo = ",".join(listInfo)
+            return listInfo
         return objInfo
 
     class Meta:
@@ -522,34 +555,50 @@ class RoomSerializer(serializers.ModelSerializer):
     """聊天室序列化"""
     courseSource = serializers.SerializerMethodField(read_only=True)
     role = serializers.SerializerMethodField(read_only=True)
+    isEnd = serializers.SerializerMethodField(read_only=True)
+    isRegHuanxin = serializers.SerializerMethodField(read_only=True)
+    isLike = serializers.SerializerMethodField(read_only=True)
+    groupId = serializers.SerializerMethodField(read_only=True)
+    platform = serializers.SerializerMethodField(read_only=True)
+
+    def get_platform(self, obj):
+        if IM_PLATFORM == "TM":
+            return "tencent"
+        return "huanxin"
+
+    def get_groupId(self, obj):
+        if IM_PLATFORM == "TM":
+            return obj.tmId
+        return obj.huanxingId
+
+    def get_isLike(self, obj):
+        uuid = self.context["request"].user.get("uuid")
+        like = LikeRoom.objects.filter(userUuid__uuid=uuid, roomUuid__uuid=obj.uuid, type=1, isDelete=False).first()
+        return True if like else False
 
     def get_role(self, obj):
-        selfUuid = self.context["request"].user.get("uuid")
-        expertUuid = obj.expertUuid.userUuid.uuid if obj.expertUuid else None
-        mcUuid = obj.mcUuid.uuid
-        luckList = []
-        for luck in obj.inviterUUid:
-            luckList.append(luck.uuid)
-        role = "normal"
-        if selfUuid == expertUuid:
-            role = "expert"
-        else:
-            if selfUuid == mcUuid:
-                role = "compere"
-            else:
-                if selfUuid in luckList:
-                    role = "luck"
-        return role
+        user = self.context["request"].user.get("userObj")
+        return get_user_role(user, obj)
 
-    def get_courseware(self, obj):
+    def get_isRegHuanxin(self, obj):
+        user = self.context["request"].user.get("userObj")
+        return user.isRegisterHuanxin if user.isRegisterHuanxin else False
+
+    def get_courseSource(self, obj):
         if obj.liveCourseUuid and obj.liveCourseUuid.enable:
             return LiveCourseBannerSerializer(obj.liveCourseUuid.liveCourseBannerUuid, many=False).data
         return None
 
+    def get_isEnd(self, obj):
+        if obj.endTime:
+            return True
+        return False
+
     class Meta:
         model = ChatsRoom
         fields = (
-            "uuid", "name", "startTime", "endTime", "banner", "studyNum", "courseSource", "role")
+            "uuid", "name", "startTime", "endTime", "banner", "studyNum", "courseSource", "role", "isEnd", "groupId",
+            "isRegHuanxin", "isLike", "platform")
 
 
 class ChapterListSerializer(serializers.ModelSerializer):
@@ -647,21 +696,21 @@ class UserCouponsPostSerializer(serializers.Serializer):
     """用户领用优惠券校验"""
     couponsUuid = serializers.CharField(required=True, error_messages={'required': '请选择要领用的优惠券'})
 
-    def validate_couponsUuid(self, value):
-        coupon = Coupons.objects.filter(uuid=value).filter(q6).filter(totalNumber__gt=F("receivedNumber")).first()
-        if not coupon:
-            raise ParamError("优惠券无法领取")
-        return coupon
-
     def create_user_coupon(self, validated_data, request):
-        selfUuid = request.user.get("uuid")
-        user = User.objects.filter(uuid=selfUuid).first()
+        user = request.user.get("userObj")
         validated_data["userUuid"] = user
-        userCoupon = UserCoupons.objects.filter(userUuid__uuid=selfUuid,
-                                                couponsUuid__uuid=validated_data["couponsUuid"].uuid).first()
-        if not userCoupon:
+        userCoupon = UserCoupons.objects.filter(userUuid__uuid=user.uuid,
+                                                couponsUuid__uuid=validated_data["couponsUuid"]).first()
+        if not userCoupon or userCoupon.status == 2:
+            coupon = Coupons.objects.filter(uuid=validated_data["couponsUuid"]).filter(q6).filter(
+                totalNumber__gt=F("receivedNumber")).first()
+            if not coupon:
+                return None
+            validated_data["couponsUuid"] = coupon
             try:
                 userCoupon = UserCoupons.objects.create(**validated_data)
+                coupon.receivedNumber = coupon.receivedNumber + 1
+                coupon.save()
             except Exception as e:
                 logging.error(str(e))
                 raise ParamError("领取优惠券失败")
@@ -679,9 +728,7 @@ class ExpertSerializer(serializers.ModelSerializer):
     def get_isFollower(self, obj):
         selfUuid = self.context["request"].user.get("uuid")
         follow = FollowExpert.objects.filter(userUuid__uuid=selfUuid, expertUuid__uuid=obj.uuid, status=1).first()
-        if not follow:
-            return False
-        return True
+        return True if follow else False
 
     class Meta:
         model = Experts
@@ -711,14 +758,13 @@ class BehaviorPostSerializer(serializers.Serializer):
 
     def create_behavior(self, validated_data, request):
         courseUuid = validated_data.pop("courseUuid")
-        selfUuid = request.user.get("uuid")
-        checkBehavior = Behavior.objects.filter(userUuid__uuid=selfUuid, courseUuid__uuid=courseUuid,
+        user = request.user.get("userObj")
+        checkBehavior = Behavior.objects.filter(userUuid__uuid=user.uuid, courseUuid__uuid=courseUuid,
                                                 behaviorType=validated_data["behaviorType"]).first()
         if not checkBehavior:
             course = Courses.objects.filter(uuid=courseUuid).filter(q4).first()
             if not course:
                 raise ParamError("课程信息不存在")
-            user = User.objects.filter(uuid=selfUuid).first()
             validated_data["userUuid"] = user
             validated_data["courseUuid"] = course
             try:
@@ -766,7 +812,7 @@ class SharesPostSerializer(serializers.Serializer):
 
     def create_share(self, validated_data, request):
         """添加分销记录"""
-        user = User.objects.filter(uuid=request.user.get("uuid")).first()
+        user = request.user.get("userObj")
         courseUuid = validated_data.pop("courseUuid")
         course = Courses.objects.filter(uuid=courseUuid).first()
         if not course:
@@ -860,7 +906,7 @@ class CashAccountPostSerializer(serializers.Serializer):
 
     def create_cash_account(self, validated_data, request):
         """添加账户"""
-        user = User.objects.filter(uuid=request.user.get("uuid")).first()
+        user = request.user.get("userObj")
         validated_data["userUuid"] = user
         try:
             cashAccount = CashAccount.objects.create(**validated_data)
@@ -894,32 +940,20 @@ class PromoteSerializer(CourseListSerializer):
     coupons = serializers.SerializerMethodField(read_only=True)
 
     def get_share(self, obj):
-        selfUuid = self.context["request"].user.get("uuid")
-        user = User.objects.filter(uuid=selfUuid).first()
         goods = Goods.objects.filter(content=obj.uuid).first()
         if not goods or not goods.rewardStatus:
             return None
-        data = {
-            "shareUrl": obj.shareUrl,
-            "shareImg": obj.shareImg,
-            "avatar": user.avatar,
-            "userUuid": user.uuid,
-            "nickName": user.nickName,
-            "realPrice": goods.realPrice,
-            "rewardPercent": goods.rewardPercent,
-            "courseUuid": obj.uuid
-        }
-        return data
+        shareMoney = float(int(goods.realPrice * goods.rewardPercent * 10 / 10000) / 10)
+        return shareMoney
 
-    @staticmethod
-    def get_coupons(obj):
+    def get_coupons(self, obj):
         goods = Goods.objects.filter(content=obj.uuid).first()
         if not goods:
             return None
         objInfo = goods.goodsCouponsUuid.filter(q6).filter(couponType=1, totalNumber__gt=F("receivedNumber")).first()
         if not objInfo:
             return None
-        return CouponsSerializer(objInfo, many=False).data
+        return CouponsSerializer(objInfo, context={"request": self.context["request"]}, many=False).data
 
     class Meta:
         model = Courses
@@ -946,6 +980,15 @@ class PromoteCouponsSerializer(CouponsSerializer):
 
 
 class StudyHistoryCourseSerializer(CourseListSerializer):
+    intro = serializers.SerializerMethodField(read_only=True)
+
+    def get_intro(self, obj):
+        if not obj.courseSectionUuid.first():
+            return None
+        if not obj.courseSectionUuid.first().sectionUuid:
+            return None
+        return obj.courseSectionUuid.first().sectionUuid.name
+
     class Meta:
         model = Courses
         fields = ("uuid", "name", "intro")
@@ -994,6 +1037,7 @@ class BillsSerializer(serializers.ModelSerializer):
     course = serializers.SerializerMethodField(read_only=True)
     wechatName = serializers.SerializerMethodField(read_only=True)
     createTime = serializers.SerializerMethodField(read_only=True)
+    avatar = serializers.SerializerMethodField(read_only=True)
 
     def get_course(self, obj):
         if obj.billType == 1:
@@ -1001,14 +1045,15 @@ class BillsSerializer(serializers.ModelSerializer):
             return BillsCoursesSerializer(courseInfo, many=False).data
         return None
 
+    def get_avatar(self, obj):
+        return obj.userUuid.avatar
+
     def get_wechatName(self, obj):
-        if obj.billType == 2:
-            return obj.userUuid.userWechatUuid.first().name
-        return None
+        return obj.userUuid.nickName
 
     def get_createTime(self, obj):
         return datetime_to_unix(obj.createTime)
 
     class Meta:
         model = Bill
-        fields = ("uuid", "billType", "money", "wechatName", "course", "createTime")
+        fields = ("uuid", "billType", "money", "wechatName", "course", "createTime", "avatar")

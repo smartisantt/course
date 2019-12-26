@@ -13,13 +13,16 @@ from rest_framework.decorators import api_view, permission_classes, authenticati
 
 from dwebsocket.decorators import accept_websocket
 from rest_framework.views import APIView
+from rest_framework.response import Response
 
+from client.insertQuery import get_user_role
 from client.models import Chats, Discuss
 from common.models import ChatsRoom, User
 
 # 定义一个结构存储数据
 from utils.clientAuths import ClientAuthentication
 from utils.clientPermission import ClientPermission
+from utils.tencentGetSign import TLSSigAPIv2
 
 roomDict = {}
 
@@ -150,8 +153,69 @@ def return_error(request, msg):
     return request.websocket.send(json.dumps(data).encode('utf-8'))
 
 
+def return_tencent(mark=0):
+    data = {
+        "ActionStatus": "OK",
+        "ErrorInfo": "",
+        "ErrorCode": mark
+    }
+    return data
 
-class WXPayQuery(APIView):
-    """支付结果查询"""
+
+class ImCallBackView(APIView):
+    """
+    流水列表
+    """
     authentication_classes = [ClientAuthentication]
     permission_classes = [ClientPermission]
+
+    def post(self, request):
+        command = request.data.get("CallbackCommand")
+        if command == "Group.CallbackBeforeSendMsg":
+            userUuid = request.data.get("From_Account")
+            user = User.objects.filter(uuid=userUuid).first()
+            if not user:
+                return return_tencent(1)
+            roomUuid = request.data.get("GroupId")
+            room = ChatsRoom.objects.filter(uuid=roomUuid).first()
+            if not room:
+                return return_tencent(1)
+            msgInfo = request.data.get("MsgBody")
+            msgType = msgInfo.get("msgInfo")
+            if msgType == "TIMTextElem":  # 文本消息
+                pass
+            elif msgType == "TIMFaceElem":  # 表情
+                pass
+            elif msgType == "TIMCustomElem":  # 自定义消息
+                pass
+            elif msgType == "TIMSoundElem":  # 语音消息
+                pass
+            elif msgType == "TIMImageElem":  # 图像消息
+                pass
+            elif msgType == "TIMVideoFileElem":  # 视频消息
+                pass
+            else:
+                return return_tencent(1)
+            role = get_user_role(user, room)
+            if role == "normal":
+                pass
+            elif role == "expert":
+                pass
+            elif role == "compere":
+                pass
+            elif role == "luck":
+                pass
+        return return_tencent()
+
+
+class GetSignView(APIView):
+    """
+    获取会话标识
+    """
+    authentication_classes = [ClientAuthentication]
+    permission_classes = [ClientPermission]
+
+    def get(self, request):
+        api = TLSSigAPIv2()
+        sig = api.gen_sig(request.user.get("uuid"))
+        return Response(sig)

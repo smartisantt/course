@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import logging
+import re
 
 from django.contrib.auth.models import AnonymousUser
 from django.core.cache import caches
@@ -12,19 +13,24 @@ from utils.funcTools import my_logger
 
 logger = logging.getLogger('ipandpath')
 
+# 无需token的路由
 url_list = [
                 "/api/manage/auth/login/",
                 "/api/manage/auth/register/",
                 "/api/manage/auth/sendCode/",
                 "/api/manage/auth/resetPassword/",
                 "/api/manage/auth/initAdmin/",
+                "/api/manage/im/imLogin/",
+                "/api/manage/notoken/ppt2png/",
             ]
 
 
 class CustomAuthentication(BaseAuthentication):
     def authenticate(self, request):
+        if re.match(r'^/api/manage/notoken[a-z0-9A-Z/]+/$', request.path):
+            return AnonymousUser, None
         if request.path in url_list:
-            return None, None
+            return AnonymousUser, None
 
         token = request.META.get('HTTP_TOKEN')
         if not token:
@@ -69,3 +75,26 @@ class CustomAuthorization(BasePermission):
         #             return True
         # return False
         return True
+
+
+class IMAuthentication(BaseAuthentication):
+
+    def authenticate(self, request):
+        token = request.META.get('HTTP_TOKEN', None)
+        if not token:
+            raise AuthenticationFailed("请登录后继续访问")
+        # 打印日志消息
+        my_logger(request, logger)
+        try:
+            # 读取客户端 后台的 token
+            user_info = caches['client'].get(token) or caches['default'].get(token)
+        except Exception as e:
+            logging.error(str(e))
+            raise AuthenticationFailed("服务器缓存错误")
+        if not user_info:
+            raise AuthenticationFailed('登录失效，请重新登录')
+        UserUuid = user_info.get('uuid', '')
+        user = User.objects.filter(uuid=UserUuid).first()
+        if not user:
+            raise AuthenticationFailed("登录失效，请重新登录")
+        return user, token

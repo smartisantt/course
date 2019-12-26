@@ -1,3 +1,5 @@
+import time
+
 from django.db import transaction
 from django.db.models import Max
 from django.shortcuts import render
@@ -7,15 +9,19 @@ from rest_framework.filters import OrderingFilter
 from rest_framework import mixins, viewsets, status, request
 from rest_framework.response import Response
 # Create your views here.
-from common.models import Courses, Chapters
-from manager_course.filters import CourseFilter, ChapterFilter
+from client.models import Chats
+from common.models import Courses, Chapters, ChatsRoom, User
+from manager_course.filters import CourseFilter, ChapterFilter, DummyUserFilter, ChatsHistoryFilter
 from manager_course.serializers import CourseSaveSerializer, CourseSelectSerializer, CourseUpdateSerializer, \
     CourseInfoSerializer, CourseDeleteSerializer, CourseUpdateStatusSerializer, ChaptersSelectSerializer, \
     ChapterSaveSerializer, ChaptersInfoSerializer, ChapterUpdateSerializer, ChapterDeleteSerializer, \
-    ChapterExchangeSerializer
+    ChapterExchangeSerializer, DummyUserSerializer, DummyUserPostSerializer, ChatsHistorySerializer
+from parentscourse_server.config import IM_PLATFORM
+from utils.tencentIM2 import ServerAPI
 from utils.errors import ParamError
 from utils.msg import SECTION_NOT_EXISTS, PUT_SUCCESS, CHANGE_SUCCESS, MAX_WEIGHT_ERROR, COURSE_NOT_EXISTS, \
-    MAX_WEIGHT_SUCCESS, CHAPTER_NOT_EXISTS, EXCHANGE_NUMBER_SUCCESS
+    MAX_WEIGHT_SUCCESS, CHAPTER_NOT_EXISTS, EXCHANGE_NUMBER_SUCCESS, CHAT_ROOM_NOT_EXISTS, \
+    LIVE_COURSE_END_SUCCESS, LIVE_COURSE_START_SUCCESS, POST_SUCCESS, MSG_NOT_EXISTS, DEL_SUCCESS
 
 
 class CourseView(mixins.ListModelMixin,
@@ -43,7 +49,7 @@ class CourseView(mixins.ListModelMixin,
             if serializer_data.data["chapterStyle"] == 1:
                 """        修改直播课件关联的banner       """
                 serializer_data.update_live_course(serializer_data.validated_data)
-                chat_room = serializer_data.create_chat_room(serializer_data.validated_data)
+                chat_room = serializer_data.create_chat_room(serializer_data.validated_data, request)
             chapter = serializer_data.create_chapter(serializer_data.validated_data, instance, chat_room)
         return Response(serializer_data.initial_data, status=status.HTTP_201_CREATED)
 
@@ -63,7 +69,7 @@ class CourseView(mixins.ListModelMixin,
         if not result:
             raise ParamError(serializer_data.errors)
         checkedData = serializer_data.check_params(instance, serializer_data.validated_data)
-        course = serializer_data.updateCourse(instance, checkedData)
+        course = serializer_data.updateCourse(instance, checkedData, request)
         chapter = Chapters.objects.filter(courseUuid=instance).first()
         goods = serializer_data.updateGoods(instance, checkedData)
         if instance.courseType == 1:
@@ -107,6 +113,65 @@ class CourseView(mixins.ListModelMixin,
             raise ParamError(serializer_data.errors)
         serializer_data.update_status(course, serializer_data.data)
         return Response(CHANGE_SUCCESS)
+
+    # 手动开始直播课
+    @action(methods=['put'], detail=False)
+    def startLiveCourse(self, request):
+        liveRoomId = request.data.get("liveRoomId", None)
+        if not liveRoomId:
+            raise ParamError("直播课Id不能为空")
+        if IM_PLATFORM == "TM":
+            chatRoom = ChatsRoom.objects.filter(tmId=liveRoomId).first()
+        else:
+            chatRoom = ChatsRoom.objects.filter(huanxingId=liveRoomId).first()
+
+        if not chatRoom:
+            raise ParamError(CHAT_ROOM_NOT_EXISTS)
+        if chatRoom.liveStatus != 1:
+            raise ParamError("当前状态操作无效")
+        if chatRoom.startTime < time.time() * 1000 or chatRoom.liveStatus == 2:
+            raise ParamError("直播课已开始")
+        chatRoom.actualStartTime = int(time.time() * 1000)
+        chatRoom.startTime = int(time.time() * 1000)
+        chatRoom.liveStatus = 2
+        chatRoom.save()
+        # 课程更新状态1：已完结 2：更新中,3未开始 4 直播结束 5 直播中  6 直播未开始
+        # 更改课程状态 updateStatus 5 直播中
+        chapter = Chapters.objects.filter(roomUuid=chatRoom).first()
+        if chapter:
+            chapter.updateStatus = 5
+            chapter.save()
+
+        return Response(LIVE_COURSE_START_SUCCESS)
+
+    # 手动结束直播课
+    @action(methods=['put'], detail=False)
+    def endLiveCourse(self, request):
+        liveRoomId = request.data.get("liveRoomId", None)
+        if not liveRoomId:
+            raise ParamError("直播课Id不能为空")
+        if IM_PLATFORM == "TM":
+            chatRoom = ChatsRoom.objects.filter(tmId=liveRoomId).first()
+        else:
+            chatRoom = ChatsRoom.objects.filter(huanxingId=liveRoomId).first()
+
+        if not chatRoom:
+            raise ParamError(CHAT_ROOM_NOT_EXISTS)
+        if chatRoom.liveStatus not in [1, 2]:
+            raise ParamError("当前状态操作无效")
+
+        if chatRoom.startTime > time.time() * 1000 and chatRoom.liveStatus == 1:
+            raise ParamError("直播课未开始")
+        chatRoom.endTime = int(time.time() * 1000)
+        chatRoom.liveStatus = 3  # 聊天室状态
+        chatRoom.save()
+        # 更改课程状态 updateStatus 4 已完结
+        chapter = Chapters.objects.filter(roomUuid=chatRoom).first()
+        if chapter:
+            chapter.updateStatus = 4
+            chapter.save()
+
+        return Response(LIVE_COURSE_END_SUCCESS)
 
     # @action(methods=['get'], detail=True)
     # def chapter(self, request, pk):
@@ -206,6 +271,85 @@ class ChapterView(
         result = serializer_data.is_valid(raise_exception=False)
         if not result:
             raise ParamError(serializer_data.errors)
-        changeResult = serializer_data.change_serialNumber(instance,serializer_data.data)
+        changeResult = serializer_data.change_serialNumber(instance, serializer_data.data)
         if changeResult:
             return Response(EXCHANGE_NUMBER_SUCCESS)
+
+
+class DummyUserView(mixins.ListModelMixin,
+                    mixins.CreateModelMixin,
+                    mixins.DestroyModelMixin,
+                    mixins.RetrieveModelMixin,
+                    mixins.UpdateModelMixin,
+                    viewsets.GenericViewSet):
+    queryset = User.objects.filter(isMajia=True).order_by("-createTime").all()
+    serializer_class = DummyUserSerializer
+    filter_class = DummyUserFilter
+
+    def create(self, request, *args, **kwargs):
+        serializer_data = DummyUserPostSerializer(data=request.data)
+        result = serializer_data.is_valid(raise_exception=False)
+        if not result:
+            raise ParamError(serializer_data.errors)
+        maUser = serializer_data.create_maUser(serializer_data.validated_data)
+        if not maUser:
+            raise ParamError(serializer_data.errors)
+        server = ServerAPI()
+        server.createUser(maUser.uuid, maUser.nickName, maUser.avatar)
+        return Response(POST_SUCCESS)
+
+
+class RandomDummyView(mixins.ListModelMixin,
+                      mixins.CreateModelMixin,
+                      mixins.DestroyModelMixin,
+                      mixins.RetrieveModelMixin,
+                      mixins.UpdateModelMixin,
+                      viewsets.GenericViewSet):
+    queryset = User.objects.filter(isMajia=True).order_by("?").all()[:1]
+    serializer_class = DummyUserSerializer
+    filter_class = DummyUserFilter
+    pagination_class = None
+
+
+class ChatsHistoryView(mixins.ListModelMixin,
+                       mixins.DestroyModelMixin,
+                       mixins.RetrieveModelMixin,
+                       viewsets.GenericViewSet):
+    # 已撤回的消息不做展示
+    queryset = Chats.objects.exclude(msgStatus=2).order_by("msgSeq")
+    serializer_class = ChatsHistorySerializer
+
+    filter_class = ChatsHistoryFilter
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        uuid = self.request.query_params.get("uuid")
+        if not uuid:
+            raise ParamError("请选择要进入的聊天室")
+        if IM_PLATFORM == "TM":
+            room = ChatsRoom.objects.filter(tmId=uuid).first()
+        else:
+            room = ChatsRoom.objects.filter(huanxingId=uuid).first()
+        if not room:
+            raise ParamError("聊天室不存在")
+        qs = qs.filter(roomUuid=room)
+        isQuestion = self.request.query_params.get("isQuestion", None)
+        if isQuestion != None:
+            qs = qs.filter(msgStatus=1)
+        # displayPos = self.request.query_params.get("displayPos", None)
+        # if displayPos != None:
+        #     qs = qs.filter(displayPos=displayPos)
+        # resQs = qs.filter(roomUuid__uuid=uuid).order_by("msgSeq").all()
+        return qs
+
+    def destroy(self, request, *args, **kwargs):
+        # 删
+        try:
+            instance = self.get_object()
+        except Exception as e:
+            raise ParamError(MSG_NOT_EXISTS)
+        if instance.msgStatus != 1:
+            raise ParamError("该消息状态无法删除")
+        instance.msgStatus = 3
+        instance.save()
+        return Response(DEL_SUCCESS)

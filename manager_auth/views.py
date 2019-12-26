@@ -4,13 +4,18 @@ from django.contrib.auth.hashers import make_password, check_password
 from django.core.cache import caches
 
 # Create your views here.
-from rest_framework.decorators import api_view
+from django.db import transaction
+from rest_framework.decorators import api_view, throttle_classes
+from rest_framework.throttling import ScopedRateThrottle, UserRateThrottle, AnonRateThrottle
+from rest_framework.views import APIView
 
 from client.clientCommon import match_tel, random_string, get_token
 from client.models import LoginLog
 from client.ssoSMS.sms import send_sms
-from common.models import User, Role
-from parentscourse_server.config import IS_SEND, TEL_IDENTIFY_CODE, TEST_CODE, ADMIN_TOKEN_TIMEOUT
+from common.models import User, Role, TelAuth, Permissions, Tags
+from manager_auth.init_data import init_permissions, init_roles, init_role_permission, init_tags
+from parentscourse_server.config import IS_SEND, TEL_IDENTIFY_CODE, TEST_CODE, ADMIN_TOKEN_TIMEOUT, DEFAULT_AVATAR
+from utils.errors import ParamError
 from utils.funcTools import http_return
 
 
@@ -111,11 +116,44 @@ def sendCode(request):
         return http_return(400, '短信发送失败')
 
 
+class SendSMS(APIView):
+    throttle_scope = "sms"
+
+    def post(self, request):
+        res, msg, tel = getAndCheckTel(request)
+        if not res:
+            return http_return(400, msg)
+
+        my_random = random_string(6)
+        text = "您的短信验证码是{0}。若非本人发送，请忽略此短信。本条短信免费。".format(my_random)
+        if IS_SEND:
+            rv = send_sms(tel, text)
+            try:
+                result = eval(rv)
+            except Exception as e:
+                logging.error(str(e))
+                result = {"code": 0, "msg": "", "smsid": "0"}
+        else:
+            my_random = '123456'
+            result = {'code': 2}
+        if result.get('code', '0') == 2:
+            try:
+                caches['default'].set(tel, my_random, TEL_IDENTIFY_CODE)
+            except Exception as e:
+                logging.error(str(e))
+                return http_return(400, "服务器redis连接失败")
+            return http_return(200, '短信已发送')
+        else:
+            return http_return(400, '短信发送失败')
+
+
 @api_view(["POST"])
 def register(request):
     """ 初始化管理员 """
     # if User.objects.filter(managerStatus=1).exists():
     #     return http_return(400, "已经初始化管理员")
+    # 初始化数据库基础数据
+
 
     res, msg, tel = getAndCheckTel(request)
     if not res:
@@ -146,11 +184,18 @@ def register(request):
     if checkUser:
         checkUser.managerStatus = 1
         checkUser.userRoles = 1
-        checkUser.userSource = 3
-        msg = "该用户已存在，使用的是原用户密码登录"
+        # checkUser.userSource = 3
+        msg = "该用户在新客户端已存在，请使用的是客户端密码登录"
+        # 如果要初始化老用户为管理员，则需要改变密码
         if not checkUser.passwd:
-            msg = "添加管理员成功"
+            msg = "添加管理员成功，原客户端密码已更新设置的密码"
             checkUser.passwd = make_password(password)
+            TelAuth.objects.create(
+                userUuid=checkUser,
+                tel=tel,
+                passwd=checkUser.passwd,
+                userSource=4,
+            )
         token = get_token()
         checkUser.save()
         # 给用户添加角色
@@ -160,18 +205,41 @@ def register(request):
             return http_return(400, "服务器缓存错误")
         return http_return(200, msg, {"token": token})
 
+    # 初始化基础数据
+    if Role.objects.all().exists():
+        raise ParamError("数据库role表有数据，请清空再试！")
+
+    if Permissions.objects.all().exists():
+        raise ParamError("数据库role表有数据，请清空再试！")
+
+    if Tags.objects.all().exists():
+        raise ParamError("数据库tag表有数据，请清空再试！")
+
     try:
-        user = User.objects.create(
-            tel=tel,
-            nickName=nickName,
-            managerStatus=1,
-            userRoles=1,
-            registerPlatform=5,
-            userSource=2,
-            passwd=make_password(password),
-        )
-        role = Role.objects.filter(name="管理员").first()
-        user.roles.add(role)
+        with transaction.atomic():
+            init_permissions()
+            init_roles()
+            init_role_permission()
+            init_tags()
+            password = make_password(password)
+            user = User.objects.create(
+                tel=tel,
+                nickName=nickName,
+                managerStatus=1,
+                userRoles=1,
+                avatar=DEFAULT_AVATAR,
+                registerPlatform=5,
+                # userSource=4,
+                passwd=password,
+            )
+            TelAuth.objects.create(
+                userUuid=user,
+                tel=tel,
+                passwd=password,
+                userSource=4,
+            )
+            role = Role.objects.filter(name="管理员").first()
+            user.roles.add(role)
     except Exception as e:
         logging.error(str(e))
         return http_return(400, "注册失败")
@@ -204,6 +272,8 @@ def loginByPhone(tel, code, request):
         return False, "无此管理员", None
     if caches['default'].get(tel, TEST_CODE) != code:
         return False, "验证码错误", None
+    # 验证码使用后作废
+    caches['default'].delete(tel)
     token = get_token()
     if not set_admin_session(token, checkUser):
         return False,  "服务器缓存错误", None
@@ -283,6 +353,10 @@ def modifyPassword(request):
 
     request.user.passwd = make_password(newPassword)
     request.user.save()
+    telAuth = TelAuth.objects.filter(userUuid=request.user).first()
+    if telAuth:
+        telAuth.passwd = request.user.passwd
+        telAuth.save()
     try:
         # 清除原来的缓冲
         caches['default'].delete(request.auth)
@@ -317,8 +391,17 @@ def resetPassword(request):
     if caches['default'].get(tel, TEST_CODE) != code:
         return http_return(400, "验证码错误")
 
+    # 验证码已使用，删除验证码
+    caches['default'].delete(tel)
     checkUser.passwd=make_password(password)
     checkUser.save()
+
+    telAuth = TelAuth.objects.filter(userUuid=checkUser).first()
+    if telAuth:
+        telAuth.passwd = checkUser.passwd
+        telAuth.save()
+
+
     token = get_token()
     if not set_admin_session(token, checkUser):
         return http_return(400, "服务器缓存错误")

@@ -7,6 +7,9 @@ from rest_framework.routers import DefaultRouter
 from manager.views import *
 
 urlpatterns = [
+    # 黄皇使用转PPT接口
+    path('notoken/ppt2png/', ppt2png, name='ppt2png'),
+    path('notoken/querryppt2png/', querryppt2png, name='querryppt2png'),
 ]
 
 router = DefaultRouter()
@@ -34,6 +37,8 @@ router.register('search/user', searchUserView)                                  
 router.register('search/goods', searchGoodsView)                                # 优惠卷中》》 搜索商品表
 router.register('search/courses', searchCoursesView)                            # 搜索课程表
 router.register('search/coursesLive', searchCoursesLiveView)                    # 搜索课程表
+
+# router.register('notoken/ppt2png', LiveCourseBannerView)                        # 黄皇使用转PPT接口  作废
 
 
 urlpatterns += router.urls

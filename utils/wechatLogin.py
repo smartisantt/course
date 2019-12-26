@@ -8,6 +8,8 @@ import logging
 
 import requests
 
+from parentscourse_server.config import WEBAPPID, WEBSECRET, APPID, SECRET
+
 
 class WxLogin(object):
 
@@ -18,11 +20,11 @@ class WxLogin(object):
         self.user_info_host = "https://api.weixin.qq.com/sns/userinfo"
 
         # 微信应用信息
-        self.APPID = "wxd3d1c26385c26506"
-        self.APPSECRET = "dd61b55eb4589f52ad349a2ba915d829"
+        self.APPID = APPID
+        self.APPSECRET = SECRET
         if appType == "web":
-            self.APPID = "wx233ca74b3d313293"
-            self.APPSECRET = "9cad6815a46a19e8d2fc5b50c2c3a1e4"
+            self.APPID = WEBAPPID
+            self.APPSECRET = WEBSECRET
 
     def get_access_token(self, code):
         """

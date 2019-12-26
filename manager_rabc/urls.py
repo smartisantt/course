@@ -24,4 +24,3 @@ router.register('permission', PermissionsView)
 urlpatterns += router.urls
 
 
-# todo： 前端只有登录的时候才会刷新菜单，A修改B用户的角色的时候，如果B正登录使用（则需要清除token，退出登录）

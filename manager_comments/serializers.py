@@ -1,4 +1,5 @@
 import logging
+import time
 
 from rest_framework import serializers
 from datetime import datetime
@@ -190,8 +191,8 @@ class CouponsPostSerializer(serializers.Serializer):
             raise ParamError(DATETIME_TO_TIMESTAMP_ERROR)
         # 前端传过来的是元  存数据库变为分
         if validated_data.get("accountMoney"):
-            validated_data["accountMoney"] = int(float(validated_data["accountMoney"]) * 100)
-        validated_data["money"] = int(float(validated_data["money"]) * 100)
+            validated_data["accountMoney"] = int(float(validated_data["accountMoney"]) * 100 + 0.5)
+        validated_data["money"] = int(float(validated_data["money"]) * 100 + 0.5)
         goods = validated_data.pop("goods")
         validated_data["goodsUuid"] = Goods.objects.filter(uuid=goods).first()
 
@@ -218,8 +219,8 @@ class CouponsPostSerializer(serializers.Serializer):
         instance.startTime = validated_data["startTime"]
         instance.endTime = validated_data["endTime"]
         if validated_data.get("accountMoney"):
-            instance.accountMoney = int(float(validated_data["accountMoney"])*100)     # 前端填写的单位元 变 成分
-        instance.money = int(float(validated_data["money"])*100)
+            instance.accountMoney = int(float(validated_data["accountMoney"])*100 + 0.5)     # 前端填写的单位元 变 成分
+        instance.money = int(float(validated_data["money"])*100 + 0.5)
         instance.totalNumber = validated_data["totalNumber"]
 
         if instance.couponType == 1:

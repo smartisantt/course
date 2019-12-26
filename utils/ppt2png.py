@@ -54,7 +54,6 @@ def change(client, source, bucket="hbb-ads"):
     createReq.set_TgtUri("oss://" + bucket + "/hbbcourse/ppt/" + source.split(".")[0] + "/")
     createReq.set_TgtType(tgtType)
     response = client.do_action_with_exception(createReq)
-    print(response)
     res = json.loads(response)
     taskId = res["TaskId"]
     print(taskId)
@@ -91,7 +90,7 @@ def get_res(client, taskId, sourceUrl, liveCourseBannerId):
             for x in range(pageCount):
                 ppt_list_to_insert.append(
                     CoursePPT(
-                        imgUrl="{}/{}.png".format(url, pageCount),
+                        imgUrl="{}/{}.png".format(url, x+1),
                         sortNum=x+1,    # 从1开始排序
                         enable=1,
                         liveCourseBanner_id=liveCourseBannerId
@@ -108,13 +107,23 @@ def get_res(client, taskId, sourceUrl, liveCourseBannerId):
             break
 
 
+def get_res2(client, taskId):
+    getReq = GetOfficeConversionTaskRequest.GetOfficeConversionTaskRequest()
+    getReq.set_Project(imm_project)
+    getReq.set_TaskId(taskId)
+
+    response = client.do_action_with_exception(getReq)
+    status = json.loads(response)
+
+    return status
+
 if __name__ == '__main__':
     cli = get_sts_token()
-    taskid = change(cli, "file1182754557408.ppt")
-    t = threading.Thread(target=get_res, args=(cli, taskid,
-        "https://hbb-ads.oss-cn-beijing.aliyuncs.com/file1182754557408.ppt"))
-    t.start()
-    print("end")
+    # taskid = change(cli, "5dc5678f16d3fc10511c4cfa.ppt")
+    # t = threading.Thread(target=get_res, args=(cli, taskid,
+    #     "https://airobot-test.oss-cn-beijing.aliyuncs.com/5dc5678f16d3fc10511c4cfa.ppt"))
+    # t.start()
+    # print("end")
 
     # https://hbb-ads.oss-cn-beijing.aliyuncs.com/hbbcourse/ppt/file1182754557408/1.png
-    # get_res(taskid)
+    print(get_res("C6500ABB-1A3F-4D7A-8DFC-B7E50ED94C45"))

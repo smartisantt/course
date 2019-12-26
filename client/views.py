@@ -1,25 +1,32 @@
+import os
 from datetime import timedelta
 from itertools import groupby
 
 from django.db import transaction
 from django_filters.rest_framework import DjangoFilterBackend
+from drf_haystack.viewsets import HaystackViewSet
 from rest_framework import mixins, viewsets
 from rest_framework.filters import OrderingFilter
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from client.clientCommon import MyPageNumberPagination
 from client.filters import CommentFilter, ExpertFilter
-from client.insertQuery import if_study_course
 from client.queryFilter import *
 from client.serializers import *
+from client.tasks import textWorker
+from imageTools.imageTools import download_image, code_tool
+from fileTools.uploadFile import UploadTool, delete_file
+from manager_course.serializers import ChatsHistorySerializer
+from parentscourse_server.config import SHARE_HOST, DEFAULT_SHARE_COURSE, DEFAULT_AVATAR
+from parentscourse_server.settings import BASE_DIR
 from utils.clientAuths import ClientAuthentication
 from utils.clientPermission import ClientPermission
 from utils.errors import ParamError
 from utils.funcTools import http_return
 from utils.msg import *
-from utils.qFilter import HOT_SEARCH_Q
-from drf_haystack.viewsets import HaystackViewSet
-from client.tasks import textWorker
+
+from utils.tencentIM2 import ServerAPI
 
 
 class BasePermissionModel(object):
@@ -116,7 +123,7 @@ class SectionMoreView(BasePermissionModel,
         if not qs:
             raise ParamError("版块信息不存你")
         newQueryset = []
-        for sc in qs.sectionCourseUuid.filter(status=1).all():
+        for sc in qs.sectionCourseUuid.filter(status=1).order_by("-weight").all():
             if sc.courseUuid.status == 1:
                 newQueryset.append(sc.courseUuid)
         return newQueryset
@@ -135,8 +142,11 @@ class MayLikeView(BasePermissionModel,
         res = qs.filter(Q(userUuid__uuid=self.request.user.get("uuid")) | Q(likeType=3)).order_by("likeType",
                                                                                                   "-weight").all()
         queryList = []
+        courseUuidList = []
         for re in res:
-            queryList.append(re.courseUuid)
+            if re.courseUuid and re.courseUuid.uuid not in courseUuidList:
+                queryList.append(re.courseUuid)
+                courseUuidList.append(re.courseUuid.uuid)
         return queryList
 
 
@@ -151,13 +161,19 @@ class CategroyView(BasePermissionModel,
     def get_queryset(self):
         qs = super().get_queryset()
         tagUuid = self.request.query_params.get("uuid")
-        tag = qs.filter(uuid=tagUuid)
+        tag = qs.filter(uuid=tagUuid).first()
         if not tag:
             raise ParamError("标签不存在")
-        tagChildren = tag.first().children.filter(enable=True).all()
-        courses = Courses.objects.filter(
-            Q(tags__uuid=tagUuid) | Q(tags__uuid__in=[t.uuid for t in tagChildren if tagChildren]))
-        return courses.order_by("-weight").all()
+        courseUuidList = []
+        for c in tag.courseTags.all():
+            if c.status == 1:
+                courseUuidList.append(c.uuid)
+        if tag.children:
+            for ta in tag.children.all():
+                for c in ta.courseTags.all():
+                    if c.status == 1:
+                        courseUuidList.append(c.uuid)
+        return Courses.objects.filter(uuid__in=list(set(courseUuidList))).order_by("-weight").all()
 
 
 class BehaviorView(BasePermissionModel,
@@ -172,8 +188,10 @@ class BehaviorView(BasePermissionModel,
         qs = super().get_queryset()
         selfUuid = self.request.user.get("uuid")
         behaviorType = self.request.query_params.get("type")
+        if not behaviorType:
+            raise ParamError("请选择要查看的数据")
         queryList = []
-        for qinfo in qs.filter(userUuid__uuid=selfUuid, behaviorType=behaviorType).all():
+        for qinfo in qs.filter(userUuid__uuid=selfUuid, behaviorType=behaviorType).order_by("-updateTime").all():
             if qinfo.courseUuid.status == 1:
                 queryList.append(qinfo.courseUuid)
         return queryList
@@ -234,17 +252,28 @@ class CourseView(BasePermissionModel,
             logging.error(str(e))
             raise ParamError(COURSE_NOT_EXISTS)
         courses = instance.relatedCourse.all()
-        user = User.objects.filter(uuid=request.user.get("uuid")).first()
+        user = request.user.get("userObj")
         behavior = Behavior.objects.filter(userUuid__uuid=user.uuid, courseUuid__uuid=instance.uuid,
-                                           behaviorType=3).filter(qRangeToday).first()
+                                           behaviorType=3).first()
         try:
+            instance.realPopularity += 1
+            instance.save()
             for c in courses:
-                MayLike.objects.create(
-                    userUuid=user,
-                    courseUuid=c,
-                    likeType=2,
-                )
-            if not behavior:
+                may = MayLike.objects.filter(userUuid__uuid=user.uuid, courseUuid__uuid=c.uuid).first()
+                if may:
+                    if may.likeType == 3:
+                        may.likeType = 2
+                        may.save()
+                else:
+                    MayLike.objects.create(
+                        userUuid=user,
+                        courseUuid=c,
+                        likeType=2,
+                    )
+            if behavior:
+                behavior.updateTime = datetime_to_unix(datetime.now())
+                behavior.save()
+            else:
                 Behavior.objects.create(
                     userUuid=user,
                     courseUuid=instance,
@@ -292,7 +321,7 @@ class CommentView(BasePermissionModel,
         result = serializers_data.is_valid(raise_exception=False)
         if not result:
             raise ParamError(serializers_data.errors)
-        user = User.objects.filter(uuid=request.user.get("uuid")).first()
+        user = request.user.get("userObj")
         comment = serializers_data.create_comment(serializers_data.validated_data, user, request)
         # 评论内容审核
         textWorker.delay(comment.uuid)
@@ -349,7 +378,7 @@ class CourseSourceView(BasePermissionModel,
         if not uuid:
             raise ParamError("请选择要查看的课程")
         course = super().get_queryset().filter(uuid=uuid).first()
-        user = User.objects.filter(uuid=self.request.user.get("uuid")).first()
+        user = self.request.user.get("userObj")
         qs = course.chapterCourseUuid.filter(chapterStyle__in=[2, 3], status=1).all()
         behavior = Behavior.objects.filter(userUuid__uuid=user.uuid, courseUuid__uuid=course.uuid,
                                            behaviorType=5).first()
@@ -365,7 +394,7 @@ class LivesView(BasePermissionModel,
     """首页直播列表"""
     authentication_classes = []
     permission_classes = []
-    queryset = CourseLive.objects.filter(q5, qRange).all()[:5]
+    queryset = CourseLive.objects.filter(q5, qRange).order_by("-weight").all()[:5]
     serializer_class = LivesSerializer
     pagination_class = None
 
@@ -401,23 +430,9 @@ class CourseListView(BasePermissionModel,
         if lookType == "rank":
             return qs.order_by("-vPopularity").all()
         elif lookType == "free":
-            return qs.filter(coursePermission=1).order_by("-updateTime").all()
+            return qs.filter(coursePermission=1).order_by("-weight").all()
         else:
             raise ParamError("参数错误")
-
-
-class UserInfoView(BasePermissionModel,
-                   viewsets.GenericViewSet,
-                   mixins.ListModelMixin,
-                   mixins.RetrieveModelMixin):
-    queryset = User.objects.filter(q5)
-    serializer_class = UserSerializer
-    pagination_class = None
-
-    def get_queryset(self):
-        qs = super().get_queryset()
-        selfUuid = self.request.user.get("uuid")
-        return qs.filter(uuid=selfUuid)
 
 
 class CoursesSearchView(BasePermissionModel,
@@ -435,8 +450,7 @@ class CoursesSearchView(BasePermissionModel,
         keword = self.request.query_params.get("keyword")
         if not keword:
             raise ParamError("请输入搜索关键字")
-        selfUuid = self.request.user.get("uuid")
-        user = User.objects.filter(uuid=selfUuid).first()
+        user = self.request.user.get("userObj")
         try:
             UserSearch.objects.create(
                 userUuid=user,
@@ -468,7 +482,7 @@ class HotSearchView(BasePermissionModel,
     """热搜词视图"""
     authentication_classes = []
     permission_classes = []
-    queryset = HotSearch.objects.filter(HOT_SEARCH_Q).order_by("-weight", "searchNum").all()[:10]
+    queryset = HotSearch.objects.filter(status=1).order_by("-weight", "searchNum").all()[:10]
     serializer_class = HotSearchSerializer
     pagination_class = None
 
@@ -487,7 +501,14 @@ class SearchHistoryView(BasePermissionModel,
     def get_queryset(self):
         selfUuid = self.request.user.get("uuid")
         qs = super().get_queryset()
-        return qs.filter(userUuid__uuid=selfUuid, isDelete=False).values("keyword").distinct().reverse()[:10]
+        res = qs.filter(userUuid__uuid=selfUuid, isDelete=False).order_by("-createTime").all()
+        reList = []
+        markList = []
+        for re in res:
+            if re.keyword not in markList:
+                reList.append({"keyword": re.keyword})
+                markList.append(re.keyword)
+        return reList[:10]
 
     def destroy(self, request, *args, **kwargs):
         # 清空搜索记录
@@ -538,7 +559,7 @@ class UserCouponsView(BasePermissionModel,
             qs = qs.filter(qRangeCoupons)
         else:
             raise ParamError("参数错误")
-        return qs.all()
+        return qs.order_by("-createTime").all()
 
     def create(self, request, *args, **kwargs):
         """用户领取优惠券"""
@@ -548,11 +569,6 @@ class UserCouponsView(BasePermissionModel,
         if not result:
             raise ParamError(serializers_data.errors)
         data = serializers_data.create_user_coupon(serializers_data.validated_data, request)
-        # resInfo = {
-        #     "code": 200,
-        #     "msg": "优惠券领取成功",
-        #     "data": data
-        # }
         return Response(data)
 
 
@@ -561,7 +577,7 @@ class ExpertsView(BasePermissionModel,
                   mixins.ListModelMixin,
                   mixins.RetrieveModelMixin):
     """专家序视图"""
-    queryset = Experts.objects.filter(enable=False)
+    queryset = Experts.objects.filter(enable=True)
     serializer_class = ExpertSerializer
     filter_class = ExpertFilter
     filter_backends = (DjangoFilterBackend, OrderingFilter)
@@ -583,7 +599,7 @@ class ExpertCoursesView(BasePermissionModel,
                         mixins.ListModelMixin,
                         mixins.RetrieveModelMixin):
     """专家课程视图"""
-    queryset = Courses.objects
+    queryset = Courses.objects.filter(status=1)
     serializer_class = CourseListSerializer
 
     def get_queryset(self):
@@ -642,7 +658,7 @@ class SharesView(BasePermissionModel,
     def create(self, request, *args, **kwargs):
         """用户产生分销记录"""
         # 增
-        user = User.objects.filter(uuid=request.user.get("uuid")).first()
+        user = request.user.get("userObj")
         if not user.userTelUuid.first():
             return http_return(400, "请绑定手机号后分享")
         serializers_data = SharesPostSerializer(data=request.data)
@@ -675,7 +691,7 @@ class ExchangeCodeView(APIView):
         invite = InviteCodes.objects.filter(status=1, code=code).first()
         if not invite:
             return http_return(400, "兑换码不可用")
-        user = User.objects.filter(uuid=request.user.get("uuid")).first()
+        user = request.user.get("userObj")
         try:
             invite.status = 2
             invite.userUuid = user
@@ -727,28 +743,6 @@ class FeedbackView(BasePermissionModel,
             raise ParamError(serializers_data.errors)
         serializers_data.create_feedback(serializers_data.validated_data, request)
         return Response(FEEDBACK_SUCCESS)
-
-
-class RoomView(BasePermissionModel,
-               viewsets.GenericViewSet,
-               mixins.ListModelMixin,
-               mixins.RetrieveModelMixin):
-    """聊天室详情视图"""
-    queryset = Chapters.objects.filter(status=1)
-    serializer_class = RoomSerializer
-    pagination_class = None
-
-    def get_queryset(self):
-        """获取聊天室信息"""
-        uuid = self.request.query_params.get("uuid")
-        if not uuid:
-            raise ParamError("请选择要进入的聊天室")
-        qs = super().get_queryset().filter(uuid=uuid, chapterStyle=1).first()
-        course = qs.courseUuid
-        user = User.objects.filter(uuid=self.request.user.get("uuid")).first()
-        if not if_study_course(course, user):
-            raise ParamError("你还没有购买该课程，请购买")
-        return qs.roomUuid
 
 
 class ChatsView(BasePermissionModel,
@@ -823,10 +817,9 @@ class CoursesSearchViewSet(HaystackViewSet):
 
     def get_queryset(self, index_models=[]):
         text = self.request.query_params.get("text")
-        selfUuid = self.request.user.get("uuid")
         if not text:
             raise ParamError("请输入搜索关键字")
-        user = User.objects.filter(uuid=selfUuid).first()
+        user = self.request.user.get("userObj")
         try:
             UserSearch.objects.create(
                 userUuid=user,
@@ -850,7 +843,7 @@ class CoursesSearchViewSet(HaystackViewSet):
             raise ParamError("更新热搜次数失败")
         super().get_queryset()
         if self.queryset is not None and isinstance(self.queryset, self.object_class):
-            queryset = self.queryset.all()
+            queryset = self.queryset.filter(status=1).all()
         else:
             queryset = self.object_class()._clone()
             if len(index_models):
@@ -945,7 +938,7 @@ class PromoteView(BasePermissionModel,
 
     def get_queryset(self):
         qs = super().get_queryset()
-        coursesUuidList = [g.content for g in qs.all()]
+        coursesUuidList = [g.content for g in qs.all() if g.content]
         return Courses.objects.filter(status=1, uuid__in=coursesUuidList).order_by("-weight", "-createTime").all()
 
 
@@ -955,7 +948,7 @@ class PromoteCouponsView(BasePermissionModel,
                          mixins.DestroyModelMixin,
                          mixins.RetrieveModelMixin):
     """推广中心优惠券视图"""
-    queryset = Coupons.objects.filter(couponType=1, status=1).filter(qRange)
+    queryset = Coupons.objects.filter(goodsUuid__rewardStatus=True, couponType=1, status=1).filter(qRangeEnd)
     serializer_class = PromoteCouponsSerializer
 
 
@@ -1050,19 +1043,450 @@ class CourseUseCouponsView(BasePermissionModel,
         qs = super().get_queryset()
         uuid = self.request.query_params.get("uuid", None)
         if not uuid:
-            raise ParamError("请选择要查看可用优惠券的类型")
+            raise ParamError("请选择要查看可用优惠券的课程")
         good = Goods.objects.filter(content=uuid).first()
-        if not good:
+        if not good or not good.isCoupon:
             return []
-        res = qs.filter(userUuid__uuid=self.request.user.get("uuid")).order_by("-createTime").all()
+        res = qs.filter(userUuid__uuid=self.request.user.get("uuid")).filter(qRangeCouponsUse).order_by(
+            "-createTime").all()
         objQueryset = []
         for r in res:
             coupon = r.couponsUuid
             if coupon:
-                if coupon.couponType == 1 and coupon.goodsUuid.content == uuid:
+                if coupon.couponType == 1 and coupon.goodsUuid.content == uuid and good.realPrice >= coupon.money:
                     objQueryset.append(r)
-                elif coupon.couponType == 2 and str(good.goodsType) in coupon.scope.split(","):
+                elif coupon.couponType == 2 and str(good.goodsType) in coupon.scope.split(
+                        ",") and good.realPrice >= coupon.accountMoney and good.realPrice >= coupon.money:
                     objQueryset.append(r)
-                elif coupon.couponType == 3 and good.realPrice > coupon.accountMoney:
+                elif coupon.couponType == 3 and good.realPrice >= coupon.accountMoney and good.realPrice >= coupon.money:
                     objQueryset.append(r)
         return objQueryset
+
+
+class GetShareImgView(APIView):
+    """
+    获取分享链接
+    """
+    authentication_classes = [ClientAuthentication]
+    permission_classes = [ClientPermission]
+
+    def get(self, request):
+        user = User.objects.filter(uuid=request.user.get("uuid")).first()
+        if not user.userTelUuid.first():
+            return http_return(400, "请绑定手机号后分享")
+        uuid = request.query_params.get("uuid", None)
+        if not uuid:
+            return http_return(400, "请选择要分享的课程")
+        course = Courses.objects.filter(uuid=uuid).first()
+        if not course:
+            return http_return(400, "课程不存在")
+        checkShare = Shares.objects.filter(userUuid__uuid=user.uuid, courseUuid__uuid=uuid).first()
+        if not checkShare:
+            good = Goods.objects.filter(content=course.uuid, rewardStatus=True).first()
+            price = 0
+            if good:
+                price = float(int(good.realPrice * good.rewardPercent * 10 / 10000) / 10)
+            toolDir = os.path.join(BASE_DIR, 'imageTools')
+            avatarPath = os.path.join(toolDir, user.uuid + ".png")
+            backgroundUrlPath = os.path.join(toolDir, course.uuid + user.uuid + ".png")
+            coursePath = os.path.join(toolDir, user.uuid + course.uuid + ".png")
+            try:
+                avatar = user.avatar if user.avatar else DEFAULT_AVATAR
+                download_image(avatar, avatarPath, "avatar")  # 下载头像
+                centerUrlName = os.path.join(toolDir, "QRcenter.jpg")
+                sharUrl = SHARE_HOST + "/" + course.uuid + "/" + user.uuid
+                fontPath = os.path.join(toolDir, "wFont.ttf")
+                logoPath = os.path.join(toolDir, "logo.png")
+                shareImg = course.shareImg if course.shareImg else DEFAULT_SHARE_COURSE
+                download_image(shareImg, coursePath, "course")
+                nickName = user.nickName
+                if match_tel(nickName):
+                    nickName = get_default_name(nickName)
+                code_tool(backgroundUrlPath, sharUrl, centerUrlName, price, nickName, fontPath, logoPath, coursePath,
+                          avatarPath)
+                upload = UploadTool()
+                cresInfo = upload.put_file(backgroundUrlPath)
+                if cresInfo["code"] != 200:
+                    return http_return(400, "文件上传失败")
+                backgroundUrl = cresInfo["data"]["url"] + "?x-oss-process=image/resize,w_600,h_696/rounded-corners,r_30"
+                checkShare = Shares.objects.create(
+                    courseUuid=course,
+                    userUuid=user,
+                    shareUrl=sharUrl,
+                    realPrice=good.realPrice,
+                    rewardPercent=good.rewardPercent,
+                    shareImg=backgroundUrl
+                )
+            except Exception as e:
+                logging.error(str(e))
+                return http_return(400, "获取分享图失败")
+            finally:
+                delete_file([avatarPath, backgroundUrlPath, coursePath])
+        resList = list()
+        resList.append(checkShare.shareImg)
+        return Response(resList)
+
+
+class FollowExpertView(APIView):
+    """
+    关注，取消关注专家
+    """
+    authentication_classes = [ClientAuthentication]
+    permission_classes = [ClientPermission]
+
+    def post(self, request):
+        uuid = request.data.get("uuid", None)
+        operaType = request.data.get("type", None)
+        if not uuid:
+            return http_return(400, "请选择要关注的专家")
+        expert = Experts.objects.filter(uuid=uuid).first()
+        if not expert:
+            return http_return(400, "专家不存在")
+        userUuid = request.user.get("uuid")
+        user = User.objects.filter(uuid=userUuid).first()
+        checkFollow = FollowExpert.objects.filter(userUuid__uuid=userUuid, expertUuid__uuid=uuid).first()
+        if operaType == "follow":
+            if checkFollow:
+                if checkFollow.status != 1:
+                    checkFollow.status = 1
+                    try:
+                        checkFollow.save()
+                    except Exception as e:
+                        logging.error(str(e))
+                        return http_return(400, "关注失败")
+            else:
+                FollowExpert.objects.create(userUuid=user, expertUuid=expert)
+            return http_return(200, "关注成功")
+        else:
+            if checkFollow:
+                if checkFollow.status == 1:
+                    checkFollow.status = 2
+                    try:
+                        checkFollow.save()
+                    except Exception as e:
+                        logging.error(str(e))
+                        return http_return(400, "取消关注失败")
+            return http_return(200, "取消关注成功")
+
+
+class LikeRoomListView(APIView):
+    authentication_classes = [ClientAuthentication]
+    permission_classes = [ClientPermission]
+
+    def get(self, request):
+        likeRooms = LikeRoom.objects.filter(userUuid__uuid=request.user.get("uuid"), isDelete=False, type=1).order_by(
+            "-createTime").all()
+        rooms = [like.roomUuid for like in likeRooms if like.roomUuid]
+        pg = MyPageNumberPagination()
+        pager_rooms = pg.paginate_queryset(queryset=rooms, request=request, view=self)
+        ser = RoomSerializer(instance=pager_rooms, context={"request": request}, many=True)
+        return pg.get_paginated_response(ser.data)
+
+    def post(self, request):
+        roomUuid = request.data.get("uuid", None)
+        if not roomUuid:
+            return http_return(400, "请选择要收藏的直播间")
+        room = ChatsRoom.objects.filter(uuid=roomUuid).first()
+        if not room:
+            return http_return(400, "直播间不存在")
+        userUuid = request.user.get("uuid")
+        checkLike = LikeRoom.objects.filter(userUuid__uuid=userUuid, roomUuid__uuid=roomUuid, type=1).first()
+        if checkLike:
+            if checkLike.isDelete:
+                checkLike.isDelete = False
+                try:
+                    checkLike.save()
+                except Exception as e:
+                    logging.error(str(e))
+                    return http_return(400, "收藏失败")
+        else:
+            LikeRoom.objects.create(
+                userUuid=request.user.get("userObj"),
+                roomUuid=room,
+                remarks="收藏聊天室",
+                type=1
+            )
+        return http_return(200, "收藏成功")
+
+    def delete(self, request):
+        uuid = request.data.get("uuid", None)
+        if not uuid:
+            return http_return(400, "请选择要取消收藏的聊天室")
+        userUuid = request.user.get("uuid")
+        checkLike = LikeRoom.objects.filter(userUuid__uuid=userUuid, roomUuid__uuid=uuid, type=1).first()
+        if checkLike:
+            if not checkLike.isDelete:
+                checkLike.isDelete = True
+                try:
+                    checkLike.save()
+                except Exception as e:
+                    logging.error(str(e))
+                    return http_return(400, "取消收藏失败")
+        return http_return(200, "取消收藏成功")
+
+
+class RoomDetailView(APIView):
+    """聊天室详情视图"""
+    authentication_classes = [ClientAuthentication]
+    permission_classes = [ClientPermission]
+
+    def get(self, request):
+        uuid = request.query_params.get("uuid")
+        if uuid:
+            chapter = Chapters.objects.filter(uuid=uuid, chapterStyle=1).first()
+            if not chapter:
+                return http_return(400, "章节不存在")
+            course = chapter.courseUuid
+            user = request.user.get("userObj")
+            behavior = Behavior.objects.filter(userUuid=user.uuid, courseUuid__uuid=course.uuid, behaviorType=5,
+                                               isDelete=False).first()
+            if not if_study_course(course, user, behavior):
+                return http_return(400, "你还没有购买该课程，请购买")
+            room = chapter.roomUuid
+            checkRight = LikeRoom.objects.filter(userUuid__uuid=request.user.get("uuid"), roomUuid__uuid=room.uuid,
+                                                 type=2).first()
+            if not checkRight:
+                LikeRoom.objects.create(
+                    userUuid=request.user.get("userObj"),
+                    roomUuid=room,
+                    type=2
+                )
+        else:
+            roomUuid = request.query_params.get("roomUuid", None)
+            if not roomUuid:
+                return http_return(400, "请选择要进入的聊天室")
+            right = LikeRoom.objects.filter(userUuid__uuid=request.user.get("uuid"), roomUuid__uuid=roomUuid,
+                                            type=2).first()
+            if not right:
+                return http_return(400, "没有购买该课程，不能进入直播间")
+            room = ChatsRoom.objects.filter(uuid=roomUuid).first()
+        if room and room.startTime > datetime_to_unix(datetime.now()):
+            return http_return(400, "直播未开始")
+        data = RoomSerializer(room, many=False, context={"request": request}).data
+        return Response(data)
+
+
+class CheckRoomRight(APIView):
+    authentication_classes = [ClientAuthentication]
+    permission_classes = [ClientPermission]
+
+    def get(self, request):
+        uuid = request.query_params.get("uuid", None)
+        if not uuid:
+            return http_return(400, "请选择要进入的聊天室")
+        right = LikeRoom.objects.filter(userUuid__uuid=request.user.get("uuid"), roomUuid__uuid=uuid,
+                                        type=2).first()
+        haveRight = True if right else False
+        return http_return(200, "成功", haveRight)
+
+
+class RelatCourseView(APIView):
+    authentication_classes = [ClientAuthentication]
+    permission_classes = [ClientPermission]
+
+    def get(self, request):
+        uuid = request.query_params.get("uuid", None)
+        if not uuid:
+            return http_return(400, "请选择课程")
+        course = Courses.objects.filter(uuid=uuid, status=1).first()
+        if not course:
+            return http_return(400, "未获取到课程信息")
+        courses = course.relatedCourse.filter(status=1).order_by("-createTime").all()
+        pg = MyPageNumberPagination()
+        pager_course = pg.paginate_queryset(queryset=courses, request=request, view=self)
+        ser = CourseListSerializer(instance=pager_course, many=True)
+        return pg.get_paginated_response(ser.data)
+
+
+class RoomChatsDetailView(APIView):
+    authentication_classes = [ClientAuthentication]
+    permission_classes = [ClientPermission]
+
+    def get(self, request):
+        uuid = request.query_params.get("uuid", None)
+        if not uuid:
+            raise ParamError("请选择要进入的聊天室")
+        if IM_PLATFORM == "TM":
+            room = ChatsRoom.objects.filter(tmId=uuid).first()
+        else:
+            room = ChatsRoom.objects.filter(huanxingId=uuid).first()
+        if not room:
+            raise ParamError("聊天室不存在")
+        chat = Chats.objects.filter(roomUuid=room, msgStatus=1).order_by("msgSeq")
+        isQuestion = request.query_params.get("isQuestion", None)
+        if isQuestion != None:
+            targetDict = {"true": True, "false": False}
+            chat = chat.filter(isQuestion=targetDict[str(isQuestion)])
+        displayPos = request.query_params.get("displayPos", None)
+        if displayPos != None:
+            chat = chat.filter(displayPos=displayPos)
+        pg = MyPageNumberPagination()
+        pager_chat = pg.paginate_queryset(queryset=chat.all(), request=request, view=self)
+        ser = ChatsHistorySerializer(instance=pager_chat, many=True)
+        return pg.get_paginated_response(ser.data)
+
+
+class DelChatView(APIView):
+    """删除聊天记录"""
+    authentication_classes = [ClientAuthentication]
+    permission_classes = [ClientPermission]
+
+    def put(self, request):
+        uuid = request.data.get("uuid", None)
+        if not uuid:
+            return http_return(400, "请选择要删除信息的用户")
+        msgTime = request.data.get("msgTime", None)
+        if not msgTime:
+            return http_return(400, "请选择发消息时间")
+        content = """"msg_time":{0}""".format(str(msgTime))
+        try:
+            Chats.objects.filter(fromAccountUuid__uuid=uuid, content__contains=content).update(
+                msgStatus=3
+            )
+        except Exception as e:
+            logging.error(str(e))
+            return http_return(400, "删除失败")
+        return http_return(200, "删除成功")
+
+
+class PutWallView(APIView):
+    """上墙"""
+    authentication_classes = [ClientAuthentication]
+    permission_classes = [ClientPermission]
+
+    def put(self, request):
+        uuid = request.data.get("uuid", None)
+        if not uuid:
+            return http_return(400, "请选择上墙信息的用户")
+        msgTime = request.data.get("msgTime", None)
+        if not msgTime:
+            return http_return(400, "请选择上墙消息时间")
+        content = """"msg_time":{0}""".format(str(msgTime))
+        try:
+            Chats.objects.filter(fromAccountUuid__uuid=uuid, content__contains=content).update(
+                isWall=True
+            )
+        except Exception as e:
+            logging.error(str(e))
+            return http_return(400, "上墙失败")
+        return http_return(200, "上墙成功")
+
+
+class BanSayView(APIView):
+    """用户禁言"""
+    authentication_classes = [ClientAuthentication]
+    permission_classes = [ClientPermission]
+
+    def get(self, request):
+        roomId = request.data.get("roomId", None)
+        if not roomId:
+            return http_return(400, "请选择要查看的转态的聊天室")
+        room = ChatsRoom.objects.filter(tmId=roomId).first()
+        if not room:
+            return http_return(400, "聊天室不存在")
+        userUuid = request.data.get("userUuid", None)
+        if not userUuid:
+            return http_return(400, "请选择要查看状态的用户")
+        user = User.objects.filter(uuid=userUuid).first()
+        if not user:
+            return http_return(400, "用户不存在")
+        banSay = BanSay.objects.filter(roomUuid=roomId, userUuid=userUuid, status=1).first()
+        return http_return(200, "成功", {"isBan": True if banSay else False})
+
+    def post(self, request):
+        roomId = request.data.get("roomId", None)
+        if not roomId:
+            return http_return(400, "请选择要查看的转态的聊天室")
+        room = ChatsRoom.objects.filter(tmId=roomId).first()
+        if not room:
+            return http_return(400, "聊天室不存在")
+        userUuid = request.data.get("userUuid", None)
+        if not userUuid:
+            return http_return(400, "请选择要查看状态的用户")
+        user = User.objects.filter(uuid=userUuid).first()
+        if not user:
+            return http_return(400, "用户不存在")
+        expire = request.data.get("expire", 0)
+        if not isinstance(expire, int):
+            return http_return(400, "expire需要时整数")
+        if expire < 0:
+            return http_return(400, "expire需要大于等于0")
+        api = ServerAPI()
+        res = api.mute(roomId, userUuid, expire)
+        if not res:
+            return http_return(400,"操作失败")
+        if expire:
+            return http_return(200, "禁言成功，禁言时间{}s".format(expire))
+        else:
+            return http_return(200, "恢复禁言成功")
+        banSay = BanSay.objects.filter(roomUuid=userUuid, userUuid=userUuid).first()
+        if banSay:
+            if banSay.status == 2:
+                try:
+                    banSay.status = 1
+                    banSay.expire = int(expire)
+                    banSay.save()
+                except Exception as e:
+                    logging.error(str(e))
+        else:
+            try:
+                BanSay.objects.create(
+                    roomUuid=chatRoomId,
+                    userUuid=userName,
+                    expire=int(expire)
+                )
+            except Exception as e:
+                logging.error(str(e))
+
+
+    def put(self, request):
+        roomId = request.data.get("roomId", None)
+        if not roomId:
+            return http_return(400, "请选择要查看的转态的聊天室")
+        room = ChatsRoom.objects.filter(tmId=roomId).first()
+        if not room:
+            return http_return(400, "聊天室不存在")
+        userUuid = request.data.get("userUuid", None)
+        if not userUuid:
+            return http_return(400, "请选择要查看状态的用户")
+        user = User.objects.filter(uuid=userUuid).first()
+        if not user:
+            return http_return(400, "用户不存在")
+        banSay = BanSay.objects.filter(roomUuid=userUuid, userUuid=userUuid).first()
+        if banSay:
+            if banSay.createTime + timedelta(seconds=banSay.expire) <= datetime.now():
+                return http_return(400, "禁言时间未过，不能解禁")
+            else:
+                banSay.status = 2
+                try:
+                    banSay.save()
+                except Exception as e:
+                    logging.error(str(e))
+                    return http_return(400, "解禁失败")
+        return http_return(200, "解禁成功")
+
+
+"""定时迁移数据"""
+# scheduler = None
+# try:
+#     scheduler = BackgroundScheduler()
+#
+#
+#     @register_job(scheduler, 'cron', hour='1', minute='30', id='task_migrate')
+#     def migrate_job():
+#         if version == "debug":
+#             pass
+#         elif version == "test":
+#             pass
+#         elif version == "ali_test":
+#             endTime = get_day_zero_time(datetime.now())
+#             startTime = endTime - timedelta(days=1)
+#             get_user(startTime, endTime)  # 从hbb迁移到本系统
+#             post_user(startTime, endTime)  # 本系统迁移到hbb
+#
+#
+#     register_events(scheduler)
+#     scheduler.start()
+# except Exception as e:
+#     logging.error(str(e))
+#     scheduler.shutdown()

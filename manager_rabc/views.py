@@ -41,7 +41,7 @@ class UserView(viewsets.GenericViewSet,
     serializer_class = UserBasicSerializer
     filter_class = UserFilter
     filter_backends = (DjangoFilterBackend, OrderingFilter)
-    ordering = ('createTime',)
+    ordering = ('-createTime',)
 
     #GET  /api/manage/roles/userRoles/<string:uuid>/menu/
     # 获取指定用户显示的菜单
@@ -182,7 +182,7 @@ class UserSearchView(ListAPIView):
     pagination_class = None
 
 
-# 用户分配权限 已有用户分配权限  和 添加新管理员  todo: 后台添加管理员
+# 用户分配权限 已有用户分配权限  和 添加新管理员
 class UserRolesView(viewsets.GenericViewSet,
                     mixins.CreateModelMixin,
                     mixins.UpdateModelMixin,

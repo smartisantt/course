@@ -25,12 +25,12 @@ class ClientAuthentication(BaseAuthentication):
         #     return None,None
         token = request.META.get('HTTP_TOKEN', None)
         if not token:
-            raise AuthenticationFailed("请登录获取会话token")
+            raise AuthenticationFailed("请登录后继续访问")
         try:
             user = caches['client'].get(token)
         except Exception as e:
             logging.error(str(e))
             raise AuthenticationFailed("服务器缓存错误")
         if not user:
-            raise AuthenticationFailed("token失效，请重新登录")
+            raise AuthenticationFailed("登录失效，请重新登录")
         return user, token

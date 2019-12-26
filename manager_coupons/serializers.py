@@ -147,17 +147,25 @@ class CouponsPostSerializer(serializers.Serializer):
         now = datetime.now()
         if attrs["endTime"] < now:
             raise ParamError(ENDTIME_RANGE_ERROR)
-        goodsType = (1,2)
+        goodsType = (1, 2)
         # 当优惠类型为单品卷的时候，课程不能为空
-        if attrs['couponType']==1:
+        if attrs['couponType'] == 1:
             if not attrs.get("scope"):
                 raise ParamError("scope 字段不能为空")
             if len(attrs.get("scope")) != 1 or not set(attrs.get("scope")).issubset(goodsType):
                 raise ParamError("scope 字段错误")
             if not attrs.get("goods"):
                 raise ParamError("当优惠类型为单品卷的时候，课程不能为空")
+            # 新增优惠券接口，新增单品券时徐判断同一个单次课只能存在一个优惠券
+            coupon = Coupons.objects.filter(goodsUuid_id=attrs.get("goods")).first()
+
+            if coupon:
+                if coupon.endTime > time.time()*1000:
+                    raise ParamError("该商品已有正在使用的单品券，不能重复添加")
+                if coupon.goodsUuid.realPrice is None or coupon.goodsUuid.realPrice <= 0:
+                    raise ParamError("免费的课程不能建优惠券")
         # 当优惠卷为品类卷的时候，必选选择一个单词课 或者 系列课
-        if attrs['couponType']==2:
+        if attrs['couponType'] == 2:
             if not attrs.get("scope"):
                 raise ParamError("scope 字段不能为空")
             if not isinstance(attrs.get("scope"), list):
@@ -177,6 +185,13 @@ class CouponsPostSerializer(serializers.Serializer):
                 float(attrs["money"])
             except Exception as e:
                 raise ParamError("money 字段错误")
+
+            # 满减金额accountMoney  大于优惠价面值金额 money
+            if not attrs["accountMoney"]:
+                attrs["accountMoney"] = 0
+            else:
+                if attrs["accountMoney"] !=0 and attrs["accountMoney"] <= attrs["money"]:
+                    raise ParamError("满减金额需大于优惠券面值金额")
         return attrs
 
     def create_coupons(self, validated_data, request):
@@ -188,8 +203,10 @@ class CouponsPostSerializer(serializers.Serializer):
             raise ParamError(DATETIME_TO_TIMESTAMP_ERROR)
         # 前端传过来的是元  存数据库变为分
         if validated_data.get("accountMoney"):
-            validated_data["accountMoney"] = int(float(validated_data["accountMoney"]) * 100)
-        validated_data["money"] = int(float(validated_data["money"]) * 100)
+            validated_data["accountMoney"] = int(float(validated_data["accountMoney"])*100 + 0.5)
+        else:
+            validated_data["accountMoney"] = 0
+        validated_data["money"] = int(float(validated_data["money"])*100 + 0.5)
         goods = validated_data.pop("goods")
         validated_data["goodsUuid"] = Goods.objects.filter(uuid=goods).first()
 
@@ -216,8 +233,10 @@ class CouponsPostSerializer(serializers.Serializer):
         instance.startTime = validated_data["startTime"]
         instance.endTime = validated_data["endTime"]
         if validated_data.get("accountMoney"):
-            instance.accountMoney = int(float(validated_data["accountMoney"])*100)     # 前端填写的单位元 变 成分
-        instance.money = int(float(validated_data["money"])*100)
+            instance.accountMoney = int(float(validated_data["accountMoney"])*100 + 0.5)     # 前端填写的单位元 变 成分
+        else:
+            instance.accountMoney = 0
+        instance.money = int(float(validated_data["money"])*100 + 0.5)
         instance.totalNumber = validated_data["totalNumber"]
 
         if instance.couponType == 1:
@@ -253,7 +272,16 @@ class UserCouponsSerializer(serializers.ModelSerializer):
     @staticmethod
     def get_orderInfo(obj):
         if obj.status == 2:
-            return {"usedTime":obj.orderUuid.createTime, "orderNum": obj.orderUuid.orderNum}
+            try:
+                creatT = obj.orderUuid.createTime
+            except Exception:
+                creatT = None
+
+            try:
+                orderNum = obj.orderUuid.orderNum
+            except Exception:
+                orderNum = None
+            return {"usedTime": creatT, "orderNum": orderNum}
 
     class Meta:
         model = UserCoupons

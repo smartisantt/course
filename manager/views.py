@@ -4,7 +4,7 @@
 # Create your views here.
 from django.db import transaction
 from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view
 from rest_framework.filters import OrderingFilter
 from rest_framework import mixins, viewsets, status
 from rest_framework.generics import ListAPIView, RetrieveAPIView, GenericAPIView, UpdateAPIView
@@ -13,7 +13,7 @@ from rest_framework.views import APIView
 
 from client.models import Banner, MayLike
 from common.models import Courses, Tags, UUIDTools, Section, Experts, MustRead, CourseSource, SectionCourse, User, \
-    Goods, HotSearch, CourseLive, LiveCourseBanner, LiveCourse, LiveCourseMsg
+    Goods, HotSearch, CourseLive, LiveCourseBanner, LiveCourse, LiveCourseMsg, Chapters, ChatsRoom
 from manager.filters import TagFilter, SectionFilter, ExpertFilter, MustReadFilter, CourseSourceFilter, \
     SectionCourseFilter, SearchSectionCourseFilter, SearchUserFilter, BannerFilter, SearchGoodsFilter, \
     SearchCoursesFilter, HotSearchFilter, LiveCourseFilter, LiveCourseMsgFilter
@@ -27,9 +27,11 @@ from manager.serializers import TagSaveSerializer, TagBasicSerializer, TagUpdate
     HotSearchChangeSerializer, CourseLiveSerializer, CourseLivePostSerializer, CourseLiveUpdateSerializer, \
     CourseLiveChangeSerializer, MayLikeSerializer, MayLikePostSerializer, MayLikeUpdateSerializer, \
     MayLikeChangeSerializer, LiveCoursePostSerializer, LiveCourseSerializer, LiveCourseUpdateSerializer, \
-    LiveCourseMsgSerializer, LiveCourseBannerSerializer, LiveCourseMsgSortNumSerializer
+    LiveCourseMsgSerializer, LiveCourseBannerSerializer, LiveCourseMsgSortNumSerializer, LiveCourseBannerPostSerializer, \
+    HotSearchUpdateSerializer
 from utils.errors import ParamError
 from utils.msg import *
+from utils.ppt2png import get_sts_token, change, get_res2
 from utils.qFilter import NORMAL_USER_Q, BANNER_Q, HOT_SEARCH_Q, COURSE_LIVE_Q, GOODS_DISTRIBUTION_Q, \
     COURSE_LIVE_SEARCH_Q, MAY_LIKE_Q
 
@@ -53,7 +55,9 @@ class TagView(mixins.ListModelMixin,
         if not result:
             raise ParamError(serializer_data.errors)
         tag = {}
-        tag["parentUuid"] = Tags.objects.filter(uuid=serializer_data.data.get("parentUuid", None)).first()
+        parentUuid = Tags.objects.filter(uuid=serializer_data.data.get("parentUuid", None)).first()
+        if parentUuid:
+            tag["parentUuid"] = parentUuid
         tag["name"] = serializer_data.data.get("name", "")
         tag["weight"] = serializer_data.data.get("weight", None)
         tag["tagType"] = serializer_data.data.get("tagType", "")
@@ -193,6 +197,19 @@ class ExpertView(mixins.ListModelMixin,
             instance = self.get_object()
         except Exception as e:
             raise ParamError(EXPERT_NOT_EXISTS)
+        if instance.enable:
+            courseSource = CourseSource.objects.filter(expertUuid=instance).first()
+            if courseSource:
+                raise ParamError({"code": 400, "msg": "专家正在课件库【{}】使用".format(courseSource.name)})
+
+            chapter = Chapters.objects.filter(expertUuid=instance).first()
+            if chapter:
+                raise ParamError({"code": 400, "msg": "专家正在课程中使用"})
+
+            chatsroom = ChatsRoom.objects.filter(expertUuid=instance).first()
+            if chatsroom:
+                raise ParamError({"code": 400, "msg": "专家正在直播【{}】使用".format(chatsroom.name)})
+
         instance.enable = not instance.enable
         instance.save()
         return Response(CHANGE_SUCCESS)
@@ -289,6 +306,13 @@ class CourseSourceView(mixins.ListModelMixin,
             instance = self.get_object()
         except Exception as e:
             raise ParamError(COURSESOURCE_NOT_EXISTS)
+
+        ##################校验课件库 停用后######################
+        if instance.enable:
+            course = instance.courseSourceChapter.filter().first()
+            if course:
+                raise ParamError({"code": 400, "msg": "该课件被【{}】使用".format(course.courseUuid.name)})
+        ########################################################
         instance.enable = not instance.enable
         instance.save()
         return Response(CHANGE_SUCCESS)
@@ -298,7 +322,7 @@ class searchSectionCourseView(mixins.ListModelMixin, viewsets.GenericViewSet):
     """
         根据板块查询有效课程
     """
-    queryset = SectionCourse.objects.exclude(status=3).order_by('-weight').all()
+    queryset = SectionCourse.objects.exclude(status=3).filter(courseUuid__status=1).order_by('-weight').all()
     serializer_class = SearchSectionCourseSerializer
     filter_class = SearchSectionCourseFilter
     filter_backends = (DjangoFilterBackend, OrderingFilter)
@@ -491,10 +515,11 @@ class BannerChangeView(mixins.UpdateModelMixin, viewsets.GenericViewSet):
 
 #  热搜词
 class HotSearchView(mixins.ListModelMixin,
-                 mixins.CreateModelMixin,
-                 mixins.DestroyModelMixin,
-                 mixins.RetrieveModelMixin,
-                 viewsets.GenericViewSet):
+                    mixins.CreateModelMixin,
+                    mixins.DestroyModelMixin,
+                    mixins.UpdateModelMixin,
+                    mixins.RetrieveModelMixin,
+                    viewsets.GenericViewSet):
     queryset = HotSearch.objects.filter(HOT_SEARCH_Q)
     serializer_class = HotSearchSerializer
     filter_class = HotSearchFilter
@@ -505,6 +530,14 @@ class HotSearchView(mixins.ListModelMixin,
     def enable(self, request, pk):
         hotSearch = self.get_object()
         hotSearch.status = 2 if hotSearch.status == 1 else 1
+        hotSearch.save()
+        return Response(CHANGE_SUCCESS)
+
+    @action(methods=['put'], detail=True)
+    def defaultHotSearch(self, request, pk):
+        hotSearch = self.get_object()
+        HotSearch.objects.filter(isDefault=True).update(isDefault=False)
+        hotSearch.isDefault = True
         hotSearch.save()
         return Response(CHANGE_SUCCESS)
 
@@ -523,6 +556,19 @@ class HotSearchView(mixins.ListModelMixin,
             raise ParamError(serializer_data.errors)
         serializer_data.create(serializer_data.data)
         return Response(POST_SUCCESS)
+
+    def update(self, request, *args, **kwargs):
+        try:
+            instance = self.get_object()
+        except Exception as e:
+            raise ParamError(HOT_SEARCH_NOT_EXISTS)
+        serializer_data = HotSearchUpdateSerializer(data=request.data)
+        result = serializer_data.is_valid(raise_exception=False)
+        if not result:
+            raise ParamError(serializer_data.errors)
+        checkMsg = serializer_data.update_hotSearch(instance, serializer_data.validated_data)
+        if checkMsg:
+            return Response(PUT_SUCCESS)
 
     def destroy(self, request, *args, **kwargs):
         # 删
@@ -757,6 +803,11 @@ class LiveCourseView(mixins.ListModelMixin,
             instance = self.get_object()
         except Exception as e:
             raise ParamError(LIVE_COURSE_NOT_EXISTS)
+        ############################################
+        if instance.enable:
+            if instance.liveCourseChatsRoom.exists():
+                raise ParamError({"code": 400, "msg": "该课件被直播课【{}】使用".format(instance.liveCourseChatsRoom.first().name)})
+        ############################################
         instance.enable = not instance.enable
         instance.save()
         return Response(CHANGE_SUCCESS)
@@ -797,3 +848,45 @@ class LiveCourseMsgView(mixins.ListModelMixin,
         instance.save()
         return Response(CHANGE_SUCCESS)
 
+
+class LiveCourseBannerView(mixins.CreateModelMixin,
+                           mixins.RetrieveModelMixin,
+                           viewsets.GenericViewSet):
+    queryset = LiveCourseBanner.objects
+    serializer_class = LiveCourseBannerSerializer
+
+    def create(self, request, *args, **kwargs):
+        serializer_data = LiveCourseBannerPostSerializer(data=request.data)
+        result = serializer_data.is_valid(raise_exception=False)
+        if not result:
+            raise ParamError(serializer_data.errors)
+        liveCourseBanner = serializer_data.createPPT(serializer_data.validated_data)
+        if liveCourseBanner:
+            return Response(liveCourseBanner.data, status=status.HTTP_201_CREATED)
+
+    def retrieve(self, request, *args, **kwargs):
+        try:
+            instance = self.get_object()
+        except Exception as e:
+            raise ParamError(LIVE_COURSE_NOT_EXISTS)
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
+
+
+@api_view(["POST"])
+def ppt2png(request):
+    url = request.data.get("url", None)
+    if not url:
+        raise ParamError("url不能为空")
+    cli = get_sts_token()
+    taskid = change(cli, url.split("/")[-1], url.split("/")[2].split(".")[0])
+    return Response(taskid)
+
+
+@api_view(["GET"])
+def querryppt2png(request):
+    taskid = request.GET.get("taskid", None)
+    if not taskid:
+        raise ParamError("taskid不能为空")
+    cli = get_sts_token()
+    return Response(get_res2(cli, taskid))

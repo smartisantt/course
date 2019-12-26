@@ -14,15 +14,15 @@ from common.models import Orders, OrderDetail, User, Payment, UserMember, Withdr
 from utils.errors import ParamError
 from utils.funcTools import timeStamp2dateTime, get_ip_address
 from utils.qFilter import PAY_STATUS_Q, SHARE_MONEY_STATUS_Q, SHARE_MONEY_STATUS_Q2
-from utils.wechatPay2User import enterprise_payment_to_wallet, APPID, MCHID
+from utils.wechatPay2User import enterprise_payment_to_wallet, APPID, MCHID, amount
 
 
 class CourseRepresSerializer(serializers.ModelSerializer):
     distributionNum = serializers.SerializerMethodField()      # 分销人数
     orderNum = serializers.SerializerMethodField()
     firstTime = serializers.SerializerMethodField()            # 首次分销成功时间
-    totalMoney = serializers.SerializerMethodField()           # 累计分销收入
-    income = serializers.SerializerMethodField()               # 已结算
+    totalMoney = serializers.SerializerMethodField()           # 分销总金额（事实金额，可增加可减）
+    income = serializers.SerializerMethodField()               # （3天后的）有效分销总金额（只能增加）
 
 
     @staticmethod
@@ -163,6 +163,7 @@ class WithdrawalSerializer(serializers.ModelSerializer):
     income = serializers.SerializerMethodField()                    # 已结算
     idCard = serializers.SerializerMethodField()                    # 身份证号
     realName = serializers.SerializerMethodField()                  # 真实姓名
+    preArrivalAccountTime = serializers.SerializerMethodField()     # 预计到款时间
 
     @staticmethod
     def get_idCard(withdrawal):
@@ -170,6 +171,13 @@ class WithdrawalSerializer(serializers.ModelSerializer):
             return withdrawal.userUuid.idCard
         except Exception:
             return
+
+    @staticmethod
+    def get_preArrivalAccountTime(withdrawal):
+        if withdrawal.withdrawalStatus == 2:
+            return "大约3个工作日"
+        return
+
 
     @staticmethod
     def get_realName(withdrawal):
@@ -233,12 +241,13 @@ class WithdrawalUpdateSerializer(serializers.Serializer):
         if instance.withdrawalType == 2 and validated_data.get("withdrawalStatus") == 2:
             dataInfo = {
                 "device_info": request.user.uuid,               # 设备号， 这里可以存放 操作退款管理员的uuid
-                "amount": instance.withdrawalMoney,             # 退款金额 单位分
-                "desc": "好呗呗微信提现",                         # 退款备注
-                "re_user_name": instance.userUuid.realName,              #
+                "amount": amount or instance.withdrawalMoney,   # 退款金额 单位分  测试的时候提现金额为0.3元
+                "desc": "好呗呗微信提现",                         # 提现备注
+                "re_user_name": instance.userUuid.realName,
                 "spbill_create_ip": get_ip_address(request),    # 操作的ip地址
                 "partner_trade_no": instance.uuid,              # 商户订单号
-                "openid": instance.wxAccount                    # 退款给用户的openid
+                "openid": instance.wxAccount,                   # 退款给用户的openid
+                # "notify_url": "http://回调地址"         # https://pay.weixin.qq.com/wiki/doc/api/jsapi.php?chapter=9_4
             }
             wxboject = WxEnterprisePaymentToWallet.objects.create(
                 mch_appid=APPID,
@@ -246,31 +255,33 @@ class WithdrawalUpdateSerializer(serializers.Serializer):
                 **dataInfo
             )
             res, msg = enterprise_payment_to_wallet(dataInfo)
-            # 微信付款失败
+            # 微信企业付款到零钱失败
             if not res:
                 raise ParamError(msg)
             # 企业付款成功到零钱  -》 修改流水表
             Bill.objects.create(
                 userUuid=instance.userUuid,                  # 打款给谁
-                billType=2,
-                remarks="提现支出",
+                billType=2,                                  # 提现方式是微信
+                remarks="从账户余额提现到微信零钱",
                 money=instance.withdrawalMoney,
             )
+            # 打款成功存表
             wxboject.payment_time = msg["payment_time"]
-            instance.arrivalAccountTime = msg["payment_time"]
-            wxboject.remark = "提现成功"
+            wxboject.remark = "【{}[{}]操作提现成功】".format(request.user.nickName, request.user.tel)
             wxboject.payment_no = msg["payment_no"]
             wxboject.save()
-            # 打款成功存表
+
+            instance.arrivalAccountTime = msg["payment_time"]           # 实际到账时间
+            instance.remarks = "【{}[{}]同意提现】".format(request.user.nickName, request.user.tel)
         # 财务不同意
         if validated_data.get("withdrawalStatus") == 3:
             # 退回到余额
             user = User.objects.filter(uuid=instance.userUuid.uuid).first()
             user.banlance = user.banlance + instance.withdrawalMoney
             user.save()
+            instance.remarks = "【{}[{}]拒绝提现, 原因：{}】".format(request.user.nickName, request.user.tel, validated_data.get("remarks", "无"))
 
         instance.withdrawalStatus = validated_data.get("withdrawalStatus")
-        instance.remarks = validated_data.get("remarks", "")
         instance.save()
 
         return True

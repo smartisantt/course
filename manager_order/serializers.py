@@ -7,17 +7,18 @@ from rest_framework import serializers
 from datetime import datetime
 
 from client.clientCommon import get_orderNO
+from client.models import Behavior
 from common.models import Orders, OrderDetail, User, Payment, UserMember, Refund, RefundOperation, \
-    REFUND_MONEY_CHECK_CHOICES, WxEnterprisePaymentToWallet
+    REFUND_MONEY_CHECK_CHOICES, WxEnterprisePaymentToWallet, UserCoupons
 
 # 订单列表
 from utils.errors import ParamError
 from utils.funcTools import timeStamp2dateTime, get_ip_address
+from utils.timeTools import timeChange
 from utils.wechatPay2User import enterprise_payment_to_wallet, MCHID, APPID, wx_refund
 
 
 class RefundOperationSerializer(serializers.ModelSerializer):
-
     class Meta:
         model = RefundOperation
         exclude = ("refundUuid", "uuid", "updateTime")
@@ -58,7 +59,6 @@ class OrderDetailSerializer(serializers.ModelSerializer):
         return
         # return None
 
-
     @staticmethod
     def get_refundOperationInfo(obj):
         # oderdetail -> order -> refund -> refundoperation
@@ -68,23 +68,22 @@ class OrderDetailSerializer(serializers.ModelSerializer):
             return RefundOperationSerializer(refundOperations, many=True).data
         return []
 
-
     @staticmethod
     def get_orderInfo(obj):
         if obj.orderUuid:
             return OrderInfoSerializer(obj.orderUuid).data
         res = {
-          "uuid": None,
-          "payStatus": None,
-          "payInfo": {
-            "payWayName": None,
-            "payType": None,
-            "usedPoints": None,
-            "payTime": None
-          },
-          "shareUserUuid": None,
-          "shareMoney": None,
-          "shareMoneyStatus": None
+            "uuid": None,
+            "payStatus": None,
+            "payInfo": {
+                "payWayName": None,
+                "payType": None,
+                "usedPoints": None,
+                "payTime": None
+            },
+            "shareUserUuid": None,
+            "shareMoney": None,
+            "shareMoneyStatus": None
         }
         return res
 
@@ -94,19 +93,19 @@ class OrderDetailSerializer(serializers.ModelSerializer):
             return BuyerInfoSerializer(obj.orderUuid.userUuid).data
         except Exception:
             res = {
-                    "uuid": None,
-                    "nickName": None,
-                    "avatar": None,
-                    "tel": None,
-                    "status": None,
-                    "registerPlatform": None,
-                    "remark": None,
-                    "vipInfo": {
-                        "isVip": None,
-                        "msg": None
-                    },
-                    "isShopper": None
-                }
+                "uuid": None,
+                "nickName": None,
+                "avatar": None,
+                "tel": None,
+                "status": None,
+                "registerPlatform": None,
+                "remark": None,
+                "vipInfo": {
+                    "isVip": None,
+                    "msg": None
+                },
+                "isShopper": None
+            }
             return res
 
     class Meta:
@@ -126,18 +125,21 @@ class OrderInfoSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Orders
-        fields = ("uuid", "payStatus", "payInfo", "shareUserUuid", "shareMoney", "shareMoneyStatus")
+        fields = ("uuid", "payStatus", "payInfo", "shareUserUuid", "shareMoney",
+                  "shareMoneyStatus")
 
 
 # 支付信息
 class PayInfoSerializer(serializers.ModelSerializer):
+    payTime = serializers.SerializerMethodField()
 
-    def to_representation(self, instance):
-        data = super().to_representation(instance)
-        if data['payTime']:
-            # 时间戳转datetime
-            data['payTime'] = timeStamp2dateTime(data['payTime'])
-        return data
+    @staticmethod
+    def get_payTime(obj):
+        try:
+            # 秒时间戳转 datetime
+            return timeChange(obj.payTime, 1)
+        except Exception:
+            return
 
     class Meta:
         model = Payment
@@ -181,7 +183,7 @@ class OrderDetailBasicSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = OrderDetail
-        exclude = ("orderUuid", "updateTime", "goodsUuid", "o_product_id", "couponPrice")
+        exclude = ("orderUuid", "updateTime", "goodsUuid", "o_product_id")
 
 
 # 退款操作记录
@@ -246,25 +248,26 @@ class RefundBasicSerializer(serializers.ModelSerializer):
 
 
 class RefundPostSerializer(serializers.Serializer):
-    # 退款金额
-    refundMoney = serializers.IntegerField(min_value=0, required=True,
+    # 退款金额， 前端传的是元  注意：655.17*100 不等于65517 应该这样处理：int(655.17*100+0.5)  一次最多退500
+    refundMoney = serializers.DecimalField(min_value=0, required=True, decimal_places=2, max_digits=5,
                                            error_messages={"required": "退款金额必填", "min_value": "退款金额不能小于0"})
     # 退款备注
     refundReason = serializers.CharField(max_length=255, required=False,
                                          error_messages={"max_length": "退款原因不要超过255个字符"})
-
-    orderDetailUuid = serializers.PrimaryKeyRelatedField(queryset=OrderDetail.objects.all(),
+    # 订单的状态需要是已支付状态且没有发生退款 才可以退款
+    orderDetailUuid = serializers.PrimaryKeyRelatedField(queryset=OrderDetail.objects.filter(orderUuid__payStatus=2),
                                                          required=True,
                                                          error_messages={
-                                                            'required': "子订单uuid必填", "does_not_exist": "子订单不存在"
+                                                             'required': "子订单uuid必填", "does_not_exist": "子订单不存在或无法退款"
                                                          })
 
     def validate(self, attrs):
-        # 通过子订单 -》 判断实际退款金额是否合法
+        # 如果在此之前已经申请过退款， 且退款状态是在退款中或退款成功则返回。
         if Refund.objects.filter(orderDetailUuid=attrs["orderDetailUuid"], refundMoneyStatus__in=[1, 2]).exists():
             raise ParamError("此订单正在退款或退款成功。")
-        if attrs["orderDetailUuid"].payPrice < attrs["refundMoney"]:
-            raise ParamError("超出退款金额{}元".format(attrs["orderDetailUuid"].payPrice/100))
+        # 校验退款金额是否合法
+        if attrs["orderDetailUuid"].payPrice < int(float(attrs["refundMoney"]) * 100 + 0.5):
+            raise ParamError("订单付款款金额{}元，退款金额已超出。".format(attrs["orderDetailUuid"].payPrice / 100))
         return attrs
 
     def createRefund(self, validated_data, request):
@@ -273,31 +276,43 @@ class RefundPostSerializer(serializers.Serializer):
         # 如果之前有退款是被关闭或者取消 再次发起退款
         if refund:
             refund.refundMoneyStatus = 1
-            refund.refundMoney = validated_data["refundMoney"]*100   # 元 变 分
+            refund.refundMoney = int(float(validated_data["refundMoney"]) * 100 + 0.5)  # 元变分
             refund.refundReason = validated_data["refundReason"]
             refund.creatorUuid = request.user
             refund.save()
+
+            # orderdetail paystatus 改变成 退款中
+            order = validated_data["orderDetailUuid"].orderUuid
+            order.payStatus = 3
+            order.save()
+
             # 退款记录表
             RefundOperation.objects.create(
                 adminUserUuid=request.user,
                 refundMoneyStatus=1,
                 refundUuid=refund,
-                operation="{0}取消退款".format(request.user.nickName),
+                operation="{0}[{1}]提交退款申请。".format(request.user.nickName, request.user.tel),
                 remark=validated_data["refundReason"]
             )
             return True
         # 如果之前都没有退款
         validated_data["creatorUuid"] = request.user
-        validated_data["refundMoneyWay"] = 3                    # 目前只有微信退款
+        validated_data["refundMoney"] = int(float(validated_data["refundMoney"]) * 100 + 0.5)
+        validated_data["refundMoneyWay"] = 3  # 目前只有微信退款
         validated_data["refundNum"] = get_orderNO()
         refund = Refund.objects.create(**validated_data)
+
+        # orderdetail paystatus 改变成 退款中
+        order = validated_data["orderDetailUuid"].orderUuid
+        order.payStatus = 3
+        order.save()
 
         # 退款记录表
         RefundOperation.objects.create(
             adminUserUuid=request.user,
             refundMoneyStatus=1,
             refundUuid=refund,
-            operation="{0}取消退款".format(request.user.nickName),
+            operation="{0}[{1}]提交退款申请。".format(request.user.nickName, request.user.tel),
             remark=validated_data["refundReason"]
         )
         return True
@@ -369,6 +384,24 @@ class RefundUpdateSerializer(serializers.Serializer):
     def updateRefund(self, instance, validated_data, request):
         # 财务通过审核  修改退款表的状态， 微信支付流水表
         if instance.refundMoneyWay == 3 and validated_data["refundMoneyStatus"] == 2:
+            # 校验参数
+            try:
+                orderNum = instance.orderDetailUuid.orderUuid.orderNum
+                if not orderNum:
+                    raise ParamError("没有订单编号")
+            except Exception as e:
+                raise ParamError("没有订单编号")
+
+            try:
+                payAmount = instance.orderDetailUuid.orderUuid.payAmount
+                if not payAmount:
+                    raise ParamError("没有订单实际支付金额")
+            except Exception as e:
+                raise ParamError("没有订单实际支付金额")
+
+            if instance.refundMoney > payAmount:
+                raise ParamError("退款金额超出付款金额")
+
             dataInfo = {
                 "orderNo": instance.orderDetailUuid.orderUuid.orderNum,         # 商户系统内部订单号 完成的订单查询
                 "out_refund_no": instance.refundNum,                            # 商户系统内部的退款单号
@@ -379,7 +412,35 @@ class RefundUpdateSerializer(serializers.Serializer):
             res, msg = wx_refund(dataInfo)
             if not res:
                 raise ParamError(msg)
-            # 微信退款成功
+
+            # 微信退款成功， 修改order 里的payStatus的状态 变为4   如果有分销，如果是未结算状态，则需要改变分销状态4 取消分销
+            orderDetail = instance.orderDetailUuid
+            order = orderDetail.orderUuid
+            if order.shareMoneyStatus == 2:
+                order.shareMoneyStatus = 4
+            order.payStatus = 4
+            order.save()
+
+            # 退款成功修改，修改 删除Behavior中type=5  courseUuid
+            behavior = Behavior.objects.filter(
+                behaviorType=5,
+                courseUuid_id=orderDetail.goodsUuid.content,
+                userUuid=orderDetail.orderUuid.userUuid).first()
+            behavior.isDelete = True
+            behavior.save()
+
+            # 微信退款成功，修改 用户已领取优惠券状态
+            if order.couponUuid:
+                UserCoupons.objects.filter(uuid__in=order.couponUuid.split(",")).update(
+                    status=1, updateTime=datetime.now()
+                )
+
+        else:
+            # 拒绝退款， 修改order 里的payStatus的状态 变为2 支付成功
+            orderDetail = instance.orderDetailUuid
+            order = orderDetail.orderUuid
+            order.payStatus = 2
+            order.save()
 
         instance.refundMoneyStatus = validated_data.get("refundMoneyStatus")
         instance.remark = validated_data.get("remark", "")
@@ -387,9 +448,9 @@ class RefundUpdateSerializer(serializers.Serializer):
         # 操作记录表
         if validated_data.get("refundMoneyStatus") == 2:
             instance.receiverUuid = request.user
-            msg = "{0}受理反馈，退款成功。".format(request.user.nickName)
+            msg = "{0}[{1}]受理业务，退款成功。".format(request.user.nickName, request.user.tel)
         else:
-            msg = "{0}受理反馈，暂不受理。".format(request.user.nickName)
+            msg = "{0}[{1}]受理业务，拒绝退款。".format(request.user.nickName, request.user.tel)
         instance.save()
         RefundOperation.objects.create(
             adminUserUuid=request.user,
@@ -399,11 +460,3 @@ class RefundUpdateSerializer(serializers.Serializer):
             remark=validated_data.get("remark", "")
         )
         return True
-
-
-
-
-
-
-
-

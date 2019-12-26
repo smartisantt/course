@@ -4,7 +4,7 @@
 from django.contrib.auth.hashers import make_password
 from rest_framework import serializers
 
-from common.models import User, Role, Permissions, MANAGER_MODIFY_STATUS_CHOICES
+from common.models import User, Role, Permissions, MANAGER_MODIFY_STATUS_CHOICES, TelAuth
 from common.rePattern import TEL_PATTERN
 from utils.errors import ParamError
 from utils.msg import *
@@ -135,10 +135,14 @@ class RolePostSerializer(serializers.Serializer):
                                          'max_length': '角色名字不要大于12个字',
                                          'required': '角色名字必填'
                                      })
-    remark = serializers.CharField(max_length=512, required=False,
+
+    remark = serializers.CharField(min_length=2, max_length=30, required=True,
                                    error_messages={
-                                        'max_length': '角色备注长度大于512个字',
-                                    })
+                                         'min_length': '角色备注不要小于2个字',
+                                         'max_length': '角色备注不要大于30个字',
+                                         'required': '角色备注必填'
+                                     })
+
     permissions = serializers.SlugRelatedField(many=True,
                                                slug_field="uuid",
                                                required=True,
@@ -179,11 +183,11 @@ class RoleUpdateSerializer(serializers.Serializer):
                                          'required': '角色名字必填'
                                      })
 
-    remark = serializers.CharField(min_length=2, max_length=12, required=True,
+    remark = serializers.CharField(min_length=2, max_length=30, required=True,
                                    error_messages={
-                                         'min_length': '角色名字不要小于2个字',
-                                         'max_length': '角色名字不要大于12个字',
-                                         'required': '角色名字必填'
+                                         'min_length': '角色备注不要小于2个字',
+                                         'max_length': '角色备注不要大于30个字',
+                                         'required': '角色备注必填'
                                      })
 
     permissions = serializers.SlugRelatedField(many=True,
@@ -344,9 +348,15 @@ class UserRolesPostSerializer(serializers.Serializer):
     def create_user(self, validated_data):
         roles = validated_data.pop('roles')
         validated_data['passwd'] = make_password(validated_data['passwd'])
-        validated_data['userSource'] = 2        # 用户来源 为 新注册
+        # validated_data['userSource'] = 2        # 用户来源 为 新注册
         validated_data['registerPlatform'] = 5  # 注册平台 为 后台
         user = User.objects.create(**validated_data)
+        TelAuth.objects.create(
+            userUuid=user,
+            tel=validated_data['tel'],
+            passwd=validated_data['passwd'],
+            userSource=4,
+        )
         user.roles.set(roles)
         return True
 

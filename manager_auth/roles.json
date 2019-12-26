@@ -1,0 +1,5 @@
+[{"uuid":"04678bfe5eab4f42ae9bfe2e6e30bdf7","remark":"优惠券管理、固定配置","name":"新媒体运营","status":1},
+{"uuid":"26510f7843784140b280c8be51aeca87","remark":"课程管理、评论审核、固定配置、标签管理、优惠券管理、栏目管理","name":"内容管理员","status":1},
+{"uuid":"27b6cf6a46e3488e8906c7e18af9b84f","remark":"拥有所有权限的管理员","name":"管理员","status":1},
+{"uuid":"458ad73eb7a9493eaf8c1d3a5dc4bf26","remark":"退款审核管理、分成管理","name":"财务","status":1},
+{"uuid":"931684a0a3b242c7b8708716233065e8","remark":"订单管理","name":"订单执行","status":1}]

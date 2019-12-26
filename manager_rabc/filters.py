@@ -23,6 +23,11 @@ class UserFilter(django_filters.FilterSet):
     managerStatus = django_filters.ChoiceFilter(choices=MANAGER_MODIFY_STATUS_CHOICES)
     searchTime = django_filters.DateTimeFromToRangeFilter("createTime")  # searchTime_before   searchTime_after
 
+
+    def filter_by_roles(self, queryset, name, value):
+        roles = Role.objects.filter(name__icontains=value).all()
+        return queryset.filter(roles__in=roles)
+
     class Meta:
         model = User
         fields = ('userNum', 'nickName', 'tel', 'managerStatus', 'roles')

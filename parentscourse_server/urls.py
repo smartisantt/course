@@ -27,6 +27,7 @@ from manager_comments import urls as managerCommentsUrl
 from manager_chatroom import urls as managerChatroomUrl
 from manager_auth import urls as managerAuthUrl
 from public import urls as publicUrl
+from im_app import urls as imUrl
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -42,4 +43,5 @@ urlpatterns = [
     path('api/manage/', include((managerCouponsUrl, 'manager_coupons'), namespace='manager_coupons')),
     path('api/manage/auth/', include((managerAuthUrl, 'manager_auth'), namespace='manager_auth')),
     path('api/public/', include((publicUrl, 'public'), namespace='public')),
+    path('api/im/', include((imUrl, 'im_app'), namespace='im_app')),
 ]

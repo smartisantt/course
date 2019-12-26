@@ -20,8 +20,9 @@ COURSE_TYPE_CHOICES = (
 )
 
 COURSESOURCE_TYPE_CHOICES = (
-    (1, "视频"),
-    (2, "音频")
+    (1, "直播"),
+    (2, "音频"),
+    (3, "视频"),
 )
 
 LIVE_COURSE_BANNER_TYPE_CHOICES = (
@@ -163,12 +164,14 @@ COURSES_FORBIDDEN_CHOICES = (
     (3, "下架"),
     (4, "删除")
 )
-COURSE_UPDATE_STATUS = (
 
+COURSE_UPDATE_STATUS = (
     (1, "已完结"),
     (2, "更新中"),
-    (3, "未开始")
-
+    (3, "未开始"),
+    (4, "直播结束"),
+    (5, "直播中"),
+    (6, "直播未开始"),
 )
 
 # 角色状态
@@ -210,11 +213,19 @@ GOODS_TYPE_CHOICES = (
 
 # 聊天室角色
 CHATS_USER_ROLE = (
-    (1, "普通用户"),
-    (2, "专家"),
-    (3, "主持人"),
-    (4, "嘉宾")
+    ("normal", "普通用户"),
+    ("expert", "专家"),
+    ("compere", "主持人"),
+    ("inviter", "嘉宾")
 )
+
+# 直播消息展示位置
+CHATS_DISPLAY_POSE = (
+    ("live", "直播区域"),
+    ("barrage", "弹幕区域")
+)
+
+
 
 # 商品类型
 GOODS_TYPE = (
@@ -323,7 +334,8 @@ SECTION_COURSE_SHOW_STATUS = (
 USER_SOURCE_TYPE = (
     (1, "数据迁移"),
     (2, "新注册"),
-    (3, "数据迁移并登陆过")
+    (3, "数据迁移并登陆过"),
+    (4, "后台添加"),
 )
 
 # 猜你喜欢优先级
@@ -449,6 +461,13 @@ LIVE_COURSE_STATUS_CHOICES = (
     (1, "normal"),
     (2, "forbidden"),
     (3, "destroy")
+)
+
+# 直播课直播状态
+LIVE_STATUS_CHOICES = (
+    (1, "由时间控制开始"),
+    (2, "手动开始"),
+    (3, "手动结束")
 )
 
 # 业务类型

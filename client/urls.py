@@ -4,13 +4,13 @@ from django.urls import path
 
 from rest_framework.routers import DefaultRouter
 
-from client.socketViews import websocketLink
+from client.socketViews import websocketLink, ImCallBackView, GetSignView
 from client.userViews import *
 from client.views import *
 from client.payViews import *
 
 urlpatterns = [
-    path('sendcode/', send_code, name='send_code'),  # 发送验证码
+    path('sendcode/', SendMsgCode.as_view()),  # 发送验证码
     path('register/', register, name='register'),  # 注册
     path('login/', login, name='login'),  # 登录
     path('logout/', logout, name='logout'),  # 退出登录
@@ -21,6 +21,7 @@ urlpatterns = [
     path('bindtel/', bind_tel, name='bind_tel'),  # 微信登录绑定手机号
     path('bindwechat/', bind_wechat, name='bind_wechat'),  # 手机号绑定微信
     path('realauth/', bind_real_info, name='bind_real_info'),  # 绑定手机号和设置交易密码
+    path('checktel/', check_tel, name='check_tel'),  # 验证手机号
     path('querytel/', query_tel, name='query_tel'),  # 查询手机号是否已注册
 
     path('websocketLink/<str:token>/<str:uuid>/', websocketLink, name='websocketLink'),  # 聊天室发送消息
@@ -33,6 +34,22 @@ urlpatterns = [
     path('studyHistory/', StudyHistoryView.as_view()),  # 浏览历史
     path('cashRequest/', CashRequest.as_view()),  # 提现申请路由
     path('billList/', BillListView.as_view()),  # 用户流水列表
+    path('imcallback/', ImCallBackView.as_view()),  # 腾讯云im回调视图
+    path('getSign/', GetSignView.as_view()),  # 腾讯云im回调视图
+    path('userInfo/', UserInfo.as_view()),  # 个人信息
+    path('changeTradePwd/', ChangeTradePwd.as_view()),  # 重置交易密码
+    path('shareImg/', GetShareImgView.as_view()),  # 获取分享图
+    path('followExpert/', FollowExpertView.as_view()),  # 关注、取消关注专家
+    path('getJsSdk/', GetJsSdk.as_view()),  # 获取js sdk
+    path('likeRoom/', LikeRoomListView.as_view()),  # 聊天室收藏视图
+    path('room/', RoomDetailView.as_view()),  # 聊天室详情
+    path('roomRight/', CheckRoomRight.as_view()),  # 聊天室全校校验
+    path('payZero/', PayZeroView.as_view()),  # 价格为0接口
+    path('relateCourses/', RelatCourseView.as_view()),  # 价格为0接口
+    path('getFile/', GetFileInfo.as_view()),  # 获取文件地址
+    path('chatsHistory/', RoomChatsDetailView.as_view()),  # 获取聊天记录
+    path('delChat/', DelChatView.as_view()),  # 删除聊天记录
+    path('putWall/', PutWallView.as_view()),  # 消息上墙
 
 ]
 
@@ -52,8 +69,7 @@ router.register('courseSource', CourseSourceView)  # 课件路由
 router.register('lives', LivesView)  # 首页直播列表
 router.register('livesMore', LivesMoreView)  # 更多直播
 router.register('course', CourseListView)  # 课程排行列表、免费专区
-router.register('userInfo', UserInfoView)  # 用户详细信息
-router.register('courseSearch', CoursesSearchView)  # 搜索课程
+router.register('courseSearch', CoursesSearchView)  # 搜索课程-------暂时未使用
 router.register('searchLike', SearchLikeView)  # 模糊匹配
 router.register('hotKeyword', HotSearchView)  # 热搜词
 router.register('searchHistory', SearchHistoryView)  # 搜索历史
@@ -66,7 +82,6 @@ router.register('expertCourses', ExpertCoursesView)  # 专家课程视图
 router.register('share', SharesView)  # 分享记录
 router.register('memberCard', MemberCardView)  # 会员卡
 router.register('feedback', FeedbackView)  # 用户反馈
-router.register('room', RoomView)  # 聊天室信息
 router.register('chats', ChatsView)  # 聊天室专家发言记录
 router.register('discussDel', DiscussDelView)  # 删除聊天记录
 router.register('courses/search', CoursesSearchViewSet, base_name='courses_search')  # 课程搜索视图

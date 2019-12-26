@@ -3,7 +3,7 @@
 import threading
 import time
 
-from django.db.models import Max, Q, Sum
+from django.db.models import Max, Q, Sum, F
 from django.db.models import Max
 from django.db import transaction
 from rest_framework import serializers
@@ -36,21 +36,20 @@ class TagSaveSerializer(serializers.ModelSerializer):
         weight = data.get("weight", 1)
         tagType = data.get("tagType", "")
         level = data.get("level", "")
-        parent = self.parentUuid
+        parent = data.get("parentUuid", None)
+        if level != 1 and not parent:
+            raise ParamError(TAG_PARENT_ERROR)
+        if parent:
+            parentTag = Tags.objects.filter(uuid=parent, level=(level - 1), tagType=tagType).first()
+            if not parentTag:
+                raise ParamError(TAG_PARENT_ERROR)
         checkName = Tags.objects.filter(tagType=tagType, level=level).all().filter(name=name).first()
         if checkName:
             raise ParamError(TAG_NAME_EXISTS)
         checkSort = Tags.objects.filter(tagType=tagType, weight=weight, level=level, parentUuid=parent).first()
         if checkSort:
             raise ParamError(TAG_NUM_EXISTS)
-        parent = data.get("parentUuid", None)
-        if parent:
-            parentTag = Tags.objects.filter(uuid=parent, level=(level - 1), tagType=tagType).first()
-            if not parentTag:
-                raise ParamError(TAG_PARENT_ERROR)
             # data["parentUuid"] = parentTag.uuid
-        if level != 1 and not parent:
-            raise ParamError(TAG_PARENT_ERROR)
         return data
 
     class Meta:
@@ -201,10 +200,10 @@ class ExpertSaveSerializer(serializers.ModelSerializer):
                                             'required': "标签不能为空"
                                         })
     specialty = serializers.CharField(required=False, max_length=1024, error_messages={"max_length": "专长度有误"},
-                                      allow_blank=True,allow_null=True)
+                                      allow_blank=True, allow_null=True)
     isStar = serializers.NullBooleanField(required=True, error_messages={"required": "是否明星专家必填"})
     intro = serializers.CharField(required=False, max_length=1024,
-                                  error_messages={"max_length": "专家介绍有误"}, allow_blank=True,allow_null=True)
+                                  error_messages={"max_length": "专家介绍有误"}, allow_blank=True, allow_null=True)
     enable = serializers.NullBooleanField(required=True, error_messages={"required": "是否启用必填"})
 
     def validate(self, data):
@@ -281,10 +280,10 @@ class ExpertUpdateSerializer(serializers.Serializer):
                                             'required': "标签不能为空"
                                         })
     specialty = serializers.CharField(required=False, max_length=1024, error_messages={"max_length": "专长度有误"},
-                                      allow_blank=True,allow_null=True)
+                                      allow_blank=True, allow_null=True)
     isStar = serializers.NullBooleanField(required=True, error_messages={"required": "是否明星专家必填"})
     intro = serializers.CharField(required=False, max_length=1024,
-                                  error_messages={"max_length": "专家介绍有误"}, allow_blank=True,allow_null=True)
+                                  error_messages={"max_length": "专家介绍有误"}, allow_blank=True, allow_null=True)
     enable = serializers.NullBooleanField(required=True, error_messages={"required": "是否启用必填"})
 
     def validate(self, data):
@@ -373,14 +372,12 @@ class MustReadUpdateSerializer(serializers.ModelSerializer):
 
 
 class CoursePPTSerializer(serializers.ModelSerializer):
-
     class Meta:
         model = CoursePPT
-        fields = ("imgUrl", )
+        fields = ("imgUrl", "sortNum")
 
 
 class CourseSourceBasicSerializer(serializers.ModelSerializer):
-
     class Meta:
         model = CourseSource
         fields = (
@@ -517,7 +514,7 @@ class SectionCourseBasicSerializer(serializers.ModelSerializer):
     courses = serializers.SerializerMethodField()
 
     def get_courses(self, obj):
-        queryset = Courses.objects.filter(courseSections=obj, courseSectionUuid__status=1).all()
+        queryset = Courses.objects.filter(courseSections=obj, courseSectionUuid__status=1).order_by("-weight").all()
         if queryset:
             return CourseNameSerializer(queryset, many=True).data
         return []
@@ -569,9 +566,9 @@ class SectionCourseSaveSerializer(serializers.ModelSerializer):
         showNum = data["showNum"]
         sectionUuid = data["sectionUuid"]
         courses = data["courses"]
-        if showNum != len(courses):
-            """判断展示数量和传的课程数量是否一致"""
-            raise ParamError(SHOW_NUM_ERROR)
+        if showNum > len(courses):
+            """判断展示数量 小于等于 课程数量是否一致"""
+            raise ParamError({'code': 400, 'msg': '添加的课程数量应大于等于课程数量'})
         if int(showType) == 2 and int(showNum) not in [2, 4, 6, 8, 10, 12]:
             raise ParamError(SHOW_NUM_ERROR)
         if sectionUuid.isShow:
@@ -590,6 +587,9 @@ class SectionCourseSaveSerializer(serializers.ModelSerializer):
         section = validated_data["sectionUuid"]
         section.showType = showType
         section.showNum = showNum
+        weight = Section.objects.all().aggregate(Max('weight'))['weight__max'] or 0
+        weight += 1
+        section.weight = weight
         section.isShow = True
         section.save()
         clength = len(courses) + 1
@@ -627,9 +627,9 @@ class SectionCourseUpdateSerializer(serializers.Serializer):
         showType = data["showType"]
         showNum = data["showNum"]
         courses = data["courses"]
-        if showNum != len(courses):
+        if showNum > len(courses):
             """判断展示数量和传的课程数量是否一致"""
-            raise ParamError(SHOW_NUM_ERROR)
+            raise ParamError({'code': 400, 'msg': '添加的课程数量应大于等于课程数量'})
         if int(showType) == 2 and int(showNum) not in [2, 4, 6, 8, 10, 12]:
             raise ParamError(SHOW_NUM_ERROR)
         return data
@@ -654,9 +654,8 @@ class SectionCourseUpdateSerializer(serializers.Serializer):
             sectionsourse.status = 2
             sectionsourse.weight = 1
             sectionsourse.save()
-        SectionCourses = SectionCourse.objects.filter(courseUuid__in=courses, sectionUuid=instance).order_by(
-            "weight").all()
-        for update_date in SectionCourses:
+        for course in courses:
+            update_date = SectionCourse.objects.filter(courseUuid=course, sectionUuid=instance).first()
             update_date.status = 1
             update_date.weight = clength
             update_date.save()
@@ -715,8 +714,12 @@ class BannerPostSerializer(serializers.ModelSerializer):
             validated_data["endTime"] = timeChange(validated_data['endTime'], 2)
         except Exception as e:
             raise ParamError(DATETIME_TO_TIMESTAMP_ERROR)
-        validated_data["orderNum"] = Banner.objects.exclude(status=3).aggregate(Max('orderNum'))['orderNum__max'] or 0
-        validated_data["orderNum"] += 1
+        # validated_data["orderNum"] = Banner.objects.exclude(status=3).aggregate(Max('orderNum'))['orderNum__max'] or 0
+        # validated_data["orderNum"] += 1
+
+        Banner.objects.exclude(status=3).update(orderNum=F("orderNum") + 1, updateTime=datetime.now())
+        validated_data["orderNum"] = 1
+
         banner = Banner.objects.create(**validated_data)
         return True
 
@@ -817,6 +820,7 @@ class HotSearchPostSerializer(serializers.Serializer):
     keyword = serializers.CharField(required=True, error_messages={"required": "关键词必填"})
     status = serializers.ChoiceField(choices=HOT_SEARCH_MODIFY_CHOICES, required=True,
                                      error_messages={"required": "状态必填"})
+    icon = serializers.NullBooleanField(required=True, error_messages={"required": "是否是热搜词必填"})
 
     def validate(self, attrs):
         if HotSearch.objects.filter(keyword=attrs['keyword']).exclude(status=3).exists():
@@ -1092,9 +1096,32 @@ class LiveCourseBannerPostSerializer(serializers.Serializer):
                 raise ParamError(DURATION_VALUE_ERROR)
         # ppt
         if sourceType == 3:
+            if not sourceUrl.startswith("https://hbb-ads.oss-cn-beijing.aliyuncs.com/"):
+                raise ParamError("格式错误，需要以https://hbb-ads.oss-cn-beijing.aliyuncs.com/开头")
             if not sourceUrl.endswith("ppt") and not sourceUrl.endswith("pptx"):
                 raise ParamError(PPT_VALUE_ERROR)
         return data
+
+    # 黄皇要使用的功能
+    def createPPT(self, validated_data):
+        source_data = {}
+        source_data["name"] = validated_data["name"]
+        source_data["sourceUrl"] = validated_data["sourceUrl"]
+        liveCourseBanner = LiveCourseBanner.objects.filter(sourceUrl=source_data["sourceUrl"]).first()
+        if liveCourseBanner:
+            return LiveCourseBannerSerializer(liveCourseBanner)
+        source_data["fileSize"] = validated_data["fileSize"]
+        source_data["duration"] = validated_data.get("duration", None)
+        source_data["sourceType"] = validated_data["sourceType"]
+        liveCourseBanner = LiveCourseBanner.objects.create(**source_data)
+        # 如果传的是ppt文件，则需要转成png
+        if validated_data["sourceType"] == 3:
+            cli = get_sts_token()
+            taskid = change(cli, validated_data["sourceUrl"].split("/")[-1],
+                            validated_data["sourceUrl"].split("/")[2].split(".")[0])
+            t = threading.Thread(target=get_res, args=(cli, taskid, validated_data["sourceUrl"], liveCourseBanner.uuid))
+            t.start()
+        return LiveCourseBannerSerializer(liveCourseBanner)
 
 
 class LiveCourseMsgPostSerializer(serializers.Serializer):
@@ -1178,9 +1205,9 @@ class LiveCourseBannerSerializer(serializers.ModelSerializer):
     def get_pptType(self, obj):
         if obj.sourceType == 3:
             if obj.sourceUrl:
-                return 1            # 上传url返回url
+                return 1  # 上传url返回url
             else:
-                return 2            # 返回url列表
+                return 2  # 返回url列表
 
     def get_pptUrlList(self, obj):
         if obj.sourceType == 3 and not obj.sourceUrl:
@@ -1233,7 +1260,6 @@ class LiveCourseSerializer(serializers.ModelSerializer):
 
 
 class LiveCourseMsgSerializer(serializers.ModelSerializer):
-
     class Meta:
         model = LiveCourseMsg
         exclude = ("liveCourseUuid", "updateTime")
@@ -1288,3 +1314,20 @@ class LiveCourseMsgSortNumSerializer(serializers.ModelSerializer):
     class Meta:
         model = Section
         fields = ("uuid", "objUuid")
+
+
+class HotSearchUpdateSerializer(serializers.Serializer):
+    icon = serializers.NullBooleanField(required=True, error_messages={"required": "是否是热搜词必填"})
+    keyword = serializers.CharField(required=True, error_messages={"required": "关键词必填"})
+    status = serializers.ChoiceField(choices=HOT_SEARCH_MODIFY_CHOICES, required=True,
+                                     error_messages={"required": "状态必填"})
+
+    def update_hotSearch(self, instance, validated_data):
+        if HotSearch.objects.filter(keyword=validated_data["keyword"], status__in=[1, 2]). \
+                exclude(uuid=instance.uuid).exists():
+            raise ParamError(HOT_SEARCH_KEYWORD_ERROR)
+        instance.icon = validated_data["icon"]
+        instance.keyword = validated_data["keyword"]
+        instance.status = validated_data["status"]
+        instance.save()
+        return True

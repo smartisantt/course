@@ -50,7 +50,6 @@ class CouponsView(mixins.ListModelMixin,
         serializers_data.update_coupons(instance, serializers_data.data)
         return Response(PUT_SUCCESS)
 
-
     def destroy(self, request, *args, **kwargs):
         # 删
         try:
